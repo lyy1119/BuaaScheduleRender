@@ -3,7 +3,8 @@
 //
 // 用法：
 //
-//	go run ./cmd/render -out schedule.html
+//	go run ./cmd/render -out schedule.html                 // 横向（宽高比 1.414:1）
+//	go run ./cmd/render -out schedule.html -portrait       // 竖向打印（比例翻转 1:1.414）
 package main
 
 import (
@@ -17,6 +18,7 @@ import (
 
 func main() {
 	out := flag.String("out", "schedule.html", "输出的 HTML 文件路径")
+	portrait := flag.Bool("portrait", false, "竖版打印（翻转宽高比为 1:1.414）")
 	flag.Parse()
 
 	s := schedule.NewSampleSchedule()
@@ -30,9 +32,14 @@ func main() {
 	}
 	defer f.Close()
 
-	if err := s.RenderHTML(f); err != nil {
+	opts := schedule.RenderOptions{Portrait: *portrait}
+	if err := s.RenderHTML(f, opts); err != nil {
 		log.Fatalf("渲染失败: %v", err)
 	}
-	fmt.Printf("已生成课表网页: %s（第 1 周周一 %s，共 %d 周，课程数 %d）\n",
-		*out, s.FirstMonday.Format("2006-01-02"), s.NumWeeks, len(s.CourseInfos()))
+	orient := "横向 1.414:1"
+	if *portrait {
+		orient = "纵向 1:1.414"
+	}
+	fmt.Printf("已生成课表网页: %s（第 1 周周一 %s，共 %d 周，课程 %d 门，版面 %s）\n",
+		*out, s.FirstMonday.Format("2006-01-02"), s.NumWeeks, len(s.CourseInfos()), orient)
 }

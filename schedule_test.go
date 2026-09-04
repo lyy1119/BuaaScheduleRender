@@ -165,7 +165,7 @@ func TestSameIDDifferentTeachersAllowed(t *testing.T) {
 func TestRenderHTML(t *testing.T) {
 	s := NewSampleSchedule()
 	var b strings.Builder
-	if err := s.RenderHTML(&b); err != nil {
+	if err := s.RenderHTML(&b, RenderOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	html := b.String()
@@ -173,6 +173,10 @@ func TestRenderHTML(t *testing.T) {
 		"<!DOCTYPE html>", "2026-2027学年第一学期课表（示例）",
 		"9月7日", "9月14日", "11月30日", "节次-时间表", "08:00-08:45",
 		"1 高等数学", "*", "3 高等数学", "11 形势与政",
+		`<div class="sheet landscape">`,              // 默认横向比例容器
+		"@page { size: A4 landscape; margin: 8mm; }", // 打印方向
+		"aspect-ratio: var(--ratio) / 1",             // 1.414:1 比例
+		`<div class="viewport">`,                     // 超出比例时滚动查看的容器
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("渲染结果缺少 %q", want)
@@ -186,8 +190,8 @@ func TestRenderHTML(t *testing.T) {
 		`<span class="ci-no">1.</span> <span class="ci-name">Python程序设计(选修)</span>`,
 		`<span class="ci-no">3.</span> <span class="ci-name">高等数学A(上)</span>`,
 		`<span class="ci-no">7.</span> <span class="ci-name">线性代数</span>`,
-		`教师：王建国、李敏`,        // 同一课程多教师合并展示
-		`教室：教3-105、主M-201`, // 同一课程多教室合并展示
+		`| 王建国、李敏`,        // 同一课程多教师同行合并展示
+		`| 教3-105、主M-201`, // 同一课程多教室同行合并展示
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("课程信息表缺少排序条目 %q", want)
@@ -210,5 +214,28 @@ func TestRenderHTML(t *testing.T) {
 	// 列宽常量：13 个周次列等宽且以日期锚为准
 	if weekColWidthPx < 55 {
 		t.Errorf("weekColWidthPx = %d 偏窄，日期可能折行", weekColWidthPx)
+	}
+}
+
+// TestRenderHTMLPortrait 验证竖版渲染：比例翻转、A4 纵向打印。
+func TestRenderHTMLPortrait(t *testing.T) {
+	s := NewSampleSchedule()
+	var b strings.Builder
+	if err := s.RenderHTML(&b, RenderOptions{Portrait: true}); err != nil {
+		t.Fatal(err)
+	}
+	html := b.String()
+	for _, want := range []string{
+		`<div class="sheet portrait">`,
+		"aspect-ratio: 1 / var(--ratio)", // 翻转比例 1:1.414
+		"@page { size: A4 portrait; margin: 8mm; }",
+		"版面：A4 纵向", // 页脚提示
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("竖版渲染缺少 %q", want)
+		}
+	}
+	if strings.Contains(html, `size: A4 landscape`) {
+		t.Error("竖版渲染不应包含 A4 landscape @page")
 	}
 }

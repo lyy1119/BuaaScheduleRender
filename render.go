@@ -12,13 +12,41 @@ import (
 //   - 网格内部一律 1px 细线；课程格区域与右侧"节次-时间表/课程信息表"之间
 //     的竖向分隔用 2px 粗线；右侧信息区内部不画网格线；
 //   - 列宽由"最长日期"（月、日双位数，如 12月31日）锚定，日期表头强制单行，
-//     课程名按同一列宽预算严格截断（CellNameBudget），保证课程格也不折行。
+//     课程名按同一列宽预算严格截断（CellNameBudget），保证课程格也不折行；
+//   - 整个课表包在一个 div.sheet 中，屏幕与打印宽高比锁定为 1.414:1
+//     （A4 纸张长宽比 √2）；Portrait=true 时翻转成 1:1.414（竖版打印）。
 const (
 	cssThin   = "1px solid #000"
 	cssStrong = "2px solid #000"
 	// 各周次列宽度(px)：需容纳 DateMaxText("12月31日") 单行显示。
 	weekColWidthPx = 62
 )
+
+// PageRatio 是宽高比的基准（A4 纸张长宽比 √2 ≈ 1.414）。
+const PageRatio = 1.414
+
+// RenderOptions 控制渲染版式。
+type RenderOptions struct {
+	// Portrait 控制宽高比是否翻转：false（默认）横向，宽:高 = 1.414:1；
+	// true 竖版，宽:高 = 1:1.414，用于竖着打印。
+	Portrait bool
+}
+
+// sheetClass 根据方向返回 div.sheet 使用的 class。
+func (o RenderOptions) sheetClass() string {
+	if o.Portrait {
+		return "sheet portrait"
+	}
+	return "sheet landscape"
+}
+
+// pageCSS 根据方向返回 @page 规则（A4 横/纵）。
+func (o RenderOptions) pageCSS() string {
+	if o.Portrait {
+		return "@page { size: A4 portrait; margin: 8mm; }"
+	}
+	return "@page { size: A4 landscape; margin: 8mm; }"
+}
 
 // cellInfo 返回某一（周、星期、节次）格子命中的元素及其显示文本；无课则空。
 // 文本规则：
@@ -46,55 +74,89 @@ func (s *Schedule) CellText(week, weekday, slot int) string {
 }
 
 // RenderHTML 把课表渲染成一个完整、自包含（内嵌 CSS）、零脚本的静态 HTML 文档。
-// 页面结构：
 //
-//	① 主课表网格（与《空课程表示例.xlsx》一致）：A 星期 | B 节次 | 周次课程格，
-//	   右侧 P/Q 为"节次-时间表"（仅周一区段出现）。
-//	② 周二~周日右侧的 P17:Q100 区域放置"课程信息表"：课程按 CourseID 字典序
-//	   排列并显示 1、2、3… 序号，每条只含完整课程名/教师/教室（不含上课时间，
-//	   课名记录的就是全名，不做另起别名式的简称）。
-func (s *Schedule) RenderHTML(w io.Writer) error {
+// 布局说明：
+//  1. 整个课表（标题、主表、页脚）包在一个 <div class="sheet"> 中：
+//     - 默认横向：aspect-ratio 1.414 / 1（宽 : 高）；
+//     - opts.Portrait=true 时翻转：aspect-ratio 1 / 1.414（竖版打印）；
+//     - 屏幕上 .sheet 的宽度以视口高度为基准自适应，整体保持比例；
+//     - 表格不脱离容器自由变大：主表 max-width:100%，课程信息等可换行内容
+//     在超出可用宽度时自动换行；实在放不下的部分在 .viewport 中滚动查看，
+//     打印时取消滚动与比例裁剪，交由 @page(A4 横/纵) 分页。
+//  2. 主表网格（与《空课程表示例.xlsx》一致）：A 星期 | B 节次 | 周次课程格，
+//     右侧 P/Q 为"节次-时间表"（仅周一区段出现）。
+//  3. 周二~周日右侧的 P17:Q100 区域放置"课程信息表"：课程按 CourseID 字典序
+//     排列并显示 1、2、3… 序号，每条为同一行展示：完整课程名 | 教师 | 教室
+//     （多教师/教室以"、"合并，长度超限自动换行）。
+func (s *Schedule) RenderHTML(w io.Writer, opts RenderOptions) error {
 	if err := s.Validate(); err != nil {
 		return fmt.Errorf("渲染被拒绝：课表数据不合法: %w", err)
 	}
 	esc := func(v string) string { return template.HTMLEscapeString(v) }
 
+	orient := "横向"
+	if opts.Portrait {
+		orient = "纵向"
+	}
+
 	var b strings.Builder
 	b.WriteString("<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"UTF-8\">\n")
 	fmt.Fprintf(&b, "<title>%s</title>\n", esc(s.Title))
-	b.WriteString(`<style>
-  body { font-family: "Microsoft YaHei", "SimSun", "PingFang SC", sans-serif; margin: 16px; color: #000; }
-  h1 { font-size: 20px; text-align: center; margin: 0 0 10px; }
-  h2.info-title { font-size: 13px; margin: 2px 0 6px; text-align: center; }
+	b.WriteString("<style>\n")
+	// @page 必须位于样式顶层（不能嵌在 @media print 内），按方向动态输出
+	fmt.Fprintf(&b, "  /* 打印纸张方向：%s */\n  %s\n", esc(orient), opts.pageCSS())
+	b.WriteString(`  html, body { margin: 0; padding: 0; }
+  body { background: #f2f2f2; font-family: "Microsoft YaHei", "SimSun", "PingFang SC", sans-serif; color: #000; }
+  /* 比例容器：包住整份课表。横向 1.414:1，竖向(portrait)翻转 1:1.414 */
+  div.sheet {
+    --ratio: 1.414;
+    margin: 10px auto;
+    width: 100%;
+    max-width: calc((100vh - 20px) * var(--ratio)); /* 屏幕：宽随视口高度缩放，保持比例 */
+    aspect-ratio: var(--ratio) / 1;
+    background: #fff;
+    box-sizing: border-box;
+    border: 1px solid #bbb;
+    padding: 8px 14px;
+    overflow: hidden;
+  }
+  div.sheet.portrait { aspect-ratio: 1 / var(--ratio); max-width: calc((100vh - 20px) / var(--ratio)); }
+  div.viewport { width: 100%; max-height: calc(100vh * 0.82); overflow: auto; } /* 超出比例时滚动查看 */
+  h1 { font-size: 18px; text-align: center; margin: 0 0 8px; }
+  h2.info-title { font-size: 12px; margin: 2px 0 6px; text-align: center; }
   table { border-collapse: collapse; font-size: 11px; }
-  table#main { margin: 0 auto; border: ` + cssStrong + `; }
-  table#main th, table#main td { border: ` + cssThin + `; padding: 1px 3px; text-align: center; white-space: nowrap; }
+  table#main { margin: 0 auto; max-width: 100%; border: ` + cssStrong + `; }
+  table#main th, table#main td { border: ` + cssThin + `; padding: 1px 3px; text-align: center; }
   thead { display: table-header-group; }
-  thead th { background: #f0f0f0; font-weight: bold; }
+  thead th { background: #f0f0f0; font-weight: bold; white-space: nowrap; }
   thead tr:nth-child(2) th { border-bottom: ` + cssStrong + `; }
-  td.weekday { background: #f0f0f0; font-weight: bold; min-width: 22px; }
-  td.time { font-size: 10px; }
-  td.ps { border-left: ` + cssStrong + `; }   /* 时间表/信息表与课程格的竖向粗分隔 */
-  td.course { overflow: hidden; }              /* 课程格不折行，超出被列宽裁切 */
+  td.weekday { background: #f0f0f0; font-weight: bold; min-width: 22px; white-space: nowrap; }
+  td.time { font-size: 10px; white-space: nowrap; }
+  td.ps { border-left: ` + cssStrong + `; white-space: nowrap; } /* 时间表/信息表与课程格的竖向粗分隔 */
+  td.course { white-space: nowrap; overflow: hidden; }             /* 课程格不折行，超出被列宽裁切 */
   td.course.star { color: #555; }
-  td.info-cell { border-left: ` + cssStrong + `; text-align: left; vertical-align: top; white-space: normal; }
-  div.info-wrap { padding: 2px 8px 2px 2px; }
-  p.ci { margin: 0 0 10px; font-size: 11px; text-align: left; }
+  td.info-cell { border-left: ` + cssStrong + `; text-align: left; vertical-align: top; white-space: normal; word-break: break-all; }
+  div.info-wrap { padding: 2px 6px 2px 2px; }
+  p.ci { margin: 0 0 6px; font-size: 11px; text-align: left; white-space: normal; }
   span.ci-no { font-weight: bold; }
   span.ci-name { font-weight: bold; }
   .ci-line { color: #333; }
-  .foot, .tip { text-align: center; font-size: 10px; margin-top: 6px; }
+  .foot, .tip { text-align: center; font-size: 10px; margin: 4px 0 0; }
   @media print {
-    body { margin: 0; }
-    @page { size: A4 landscape; margin: 8mm; }
-    tr { page-break-inside: avoid; }
+    body { background: #fff; }
+    div.sheet { max-width: none; width: auto; margin: 0; border: none; padding: 0; aspect-ratio: auto; overflow: visible; }
+    div.viewport { max-height: none; overflow: visible; }
     table#main { font-size: 8.5px; }
+    tr { page-break-inside: avoid; }
   }
 </style>`)
 	b.WriteString("</head>\n<body>\n")
+	// ---------- 比例容器：包住整份课表 ----------
+	fmt.Fprintf(&b, "<div class=\"%s\">\n", esc(opts.sheetClass()))
 	fmt.Fprintf(&b, "<h1>%s</h1>\n", esc(s.Title))
 
 	// ---------- 主课表 ----------
+	b.WriteString("<div class=\"viewport\">\n")
 	b.WriteString("<table id=\"main\">\n<colgroup>")
 	// A..Q：A 星期 | B 节次 | C.. 周次（13 列等宽，锚定最长日期）| P 节次 | Q 时间
 	b.WriteString("<col style=\"width:24px\"><col style=\"width:20px\">")
@@ -157,8 +219,8 @@ func (s *Schedule) RenderHTML(w io.Writer) error {
 				} else {
 					for i := range infos {
 						ci := &infos[i]
-						// 每条课程信息用 <p>（左对齐）；不使用 <ol>/<li>，
-						// 序号为手写展示序号，排序依据 CourseID，不改动数据
+						// 每条课程信息为一个 <p>（左对齐），不使用 <ol>/<li> 列表；
+						// 完整课程名 | 教师 | 教室 显示在同一行，超出宽度自动换行
 						b.WriteString("<p class=\"ci\">")
 						fmt.Fprintf(&b, "<span class=\"ci-no\">%d.</span> <span class=\"ci-name\">%s</span>",
 							i+1, esc(ci.Name))
@@ -180,10 +242,12 @@ func (s *Schedule) RenderHTML(w io.Writer) error {
 		}
 	}
 	b.WriteString("</tbody>\n</table>\n")
+	b.WriteString("</div>\n") // .viewport
 
-	fmt.Fprintf(&b, "<p class=\"foot\">第 1 周周一起始日期：%s，共 %d 周</p>\n",
-		esc(s.FirstMonday.Format("2006年1月2日")), s.NumWeeks)
-	b.WriteString("<p class=\"tip\">打印提示：浏览器中按 Ctrl+P，纸张建议 A4（或 A3）横向，缩放可调。</p>\n")
+	fmt.Fprintf(&b, "<p class=\"foot\">第 1 周周一起始日期：%s，共 %d 周 · 版面：A4 %s（宽高比 %.3f:1）</p>\n",
+		esc(s.FirstMonday.Format("2006年1月2日")), s.NumWeeks, orient, PageRatio)
+	b.WriteString("<p class=\"tip\">打印提示：浏览器中按 Ctrl+P，请选择 A4 纸张（比例已按方向设置），缩放可调。</p>\n")
+	b.WriteString("</div>\n") // .sheet
 	b.WriteString("</body>\n</html>\n")
 
 	_, err := io.WriteString(w, b.String())
