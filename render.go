@@ -163,11 +163,11 @@ func (s *Schedule) RenderHTML(w io.Writer) error {
 						fmt.Fprintf(&b, "<span class=\"ci-no\">%d.</span> <span class=\"ci-name\">%s</span>",
 							i+1, esc(ci.Name))
 						if len(ci.Teachers) > 0 {
-							fmt.Fprintf(&b, "<br><span class=\"ci-line\">教师：%s</span>",
+							fmt.Fprintf(&b, "<span class=\"ci-line\">| %s</span>",
 								esc(strings.Join(ci.Teachers, "、")))
 						}
 						if len(ci.Locations) > 0 {
-							fmt.Fprintf(&b, "<br><span class=\"ci-line\">教室：%s</span>",
+							fmt.Fprintf(&b, "<span class=\"ci-line\">| %s</span>",
 								esc(strings.Join(ci.Locations, "、")))
 						}
 						b.WriteString("</p>")
