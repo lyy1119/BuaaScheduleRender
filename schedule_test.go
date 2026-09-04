@@ -175,11 +175,17 @@ func TestRenderHTML(t *testing.T) {
 		"1 高等数学", "*", "3 高等数学", "11 形势与政",
 		`<div class="sheet landscape">`,              // 默认横向比例容器
 		"@page { size: A4 landscape; margin: 8mm; }", // 打印方向
-		"aspect-ratio: var(--ratio) / 1",             // 1.414:1 比例
-		`<div class="viewport">`,                     // 超出比例时滚动查看的容器
+		"table-layout: fixed",                        // 表格宽度恒等于容器（整表完整显示）
+		"width: 100%",                                // 不产生横向溢出
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("渲染结果缺少 %q", want)
+		}
+	}
+	// 不使用任何内部滚动容器/滚动条：整表完整显示
+	for _, forbid := range []string{"viewport", "overflow: auto", "overflow: scroll"} {
+		if strings.Contains(html, forbid) {
+			t.Errorf("渲染结果不应包含滚动机制 %q", forbid)
 		}
 	}
 	// 课程信息表：7 条 <p>、按 CourseID 排序、带 1..7 展示序号
@@ -211,9 +217,16 @@ func TestRenderHTML(t *testing.T) {
 	if got := strings.Count(html, "1 高等数学"); got != 13 {
 		t.Errorf(`"1 高等数学" 出现 %d 次, want 13`, got)
 	}
-	// 列宽常量：13 个周次列等宽且以日期锚为准
-	if weekColWidthPx < 55 {
-		t.Errorf("weekColWidthPx = %d 偏窄，日期可能折行", weekColWidthPx)
+	// 主表列宽分配：17 列且百分比合计约为 100%（保证 fixed 布局下不溢出）
+	if len(mainColPcts) != 17 {
+		t.Errorf("mainColPcts 长度 = %d, want 17", len(mainColPcts))
+	}
+	sum := 0.0
+	for _, p := range mainColPcts {
+		sum += p
+	}
+	if sum < 99.5 || sum > 100.5 {
+		t.Errorf("mainColPcts 合计 = %.2f%%，应约为 100%%", sum)
 	}
 }
 
@@ -227,7 +240,7 @@ func TestRenderHTMLPortrait(t *testing.T) {
 	html := b.String()
 	for _, want := range []string{
 		`<div class="sheet portrait">`,
-		"aspect-ratio: 1 / var(--ratio)", // 翻转比例 1:1.414
+		"div.sheet.portrait", // 翻转比例 → 竖版更窄
 		"@page { size: A4 portrait; margin: 8mm; }",
 		"版面：A4 纵向", // 页脚提示
 	} {
