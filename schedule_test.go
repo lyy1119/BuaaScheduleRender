@@ -103,19 +103,27 @@ func TestCourseInfoSortAndDedup(t *testing.T) {
 	if infos[0].CourseID != "CS-501" {
 		t.Errorf("CourseID 不应被改写: %q", infos[0].CourseID)
 	}
-	// M-101（高数两个时间元素）只聚合为一条，且字段完整
+	// M-101（高数两个时间元素）只聚合为一条，教师/教室分别合并去重
 	var math *CourseInfo
 	for i := range infos {
 		if infos[i].CourseID == "M-101" {
 			math = &infos[i]
 		}
 	}
-	if math == nil || math.Name != "高等数学A(上)" || math.Teacher == "" || math.Location == "" {
+	if math == nil || math.Name != "高等数学A(上)" {
 		t.Fatalf("M-101 课程信息不完整: %+v", math)
+	}
+	wantTeachers := []string{"王建国", "李敏"}
+	wantLocs := []string{"教3-105", "主M-201"}
+	if strings.Join(math.Teachers, ",") != strings.Join(wantTeachers, ",") {
+		t.Errorf("M-101 教师合并 = %v, want %v", math.Teachers, wantTeachers)
+	}
+	if strings.Join(math.Locations, ",") != strings.Join(wantLocs, ",") {
+		t.Errorf("M-101 教室合并 = %v, want %v", math.Locations, wantLocs)
 	}
 }
 
-// TestValidateConflict 验证格子冲突与同 CourseID 信息不一致会被检出。
+// TestValidateConflict 验证不同课程占用同一格子会被检出。
 func TestValidateConflict(t *testing.T) {
 	s := &Schedule{
 		FirstMonday: time.Date(2026, 9, 7, 0, 0, 0, 0, time.Local),
@@ -128,16 +136,27 @@ func TestValidateConflict(t *testing.T) {
 	if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "格子冲突") {
 		t.Errorf("期望检出格子冲突, got %v", err)
 	}
-	s2 := &Schedule{
+}
+
+// TestSameIDDifferentTeachersAllowed 验证同一 CourseID 的不同元素允许携带不同的
+// 教师/教室（真实场景：分段授课、代课或换教室），由 CourseInfos 合并展示。
+func TestSameIDDifferentTeachersAllowed(t *testing.T) {
+	s := &Schedule{
 		FirstMonday: time.Date(2026, 9, 7, 0, 0, 0, 0, time.Local),
 		NumWeeks:    13,
 		Elements: []CourseElement{
-			{CourseID: "a", Name: "A", Teacher: "x", Weekday: Monday, StartSlot: 1, EndSlot: 1, WeekMask: 1},
-			{CourseID: "a", Name: "A", Teacher: "y", Weekday: Wednesday, StartSlot: 1, EndSlot: 1, WeekMask: 1},
+			{CourseID: "a", Name: "A", Teacher: "x", Location: "101",
+				Weekday: Monday, StartSlot: 1, EndSlot: 1, WeekMask: 1},
+			{CourseID: "a", Name: "A", Teacher: "y", Location: "202",
+				Weekday: Wednesday, StartSlot: 1, EndSlot: 1, WeekMask: 1},
 		},
 	}
-	if err := s2.Validate(); err == nil || !strings.Contains(err.Error(), "不一致") {
-		t.Errorf("期望检出同 CourseID 信息不一致, got %v", err)
+	if err := s.Validate(); err != nil {
+		t.Errorf("同 CourseID 不同教师/教室不应报错, got %v", err)
+	}
+	infos := s.CourseInfos()
+	if len(infos) != 1 || len(infos[0].Teachers) != 2 || len(infos[0].Locations) != 2 {
+		t.Errorf("聚合信息不正确: %+v", infos)
 	}
 }
 
@@ -159,21 +178,23 @@ func TestRenderHTML(t *testing.T) {
 			t.Errorf("渲染结果缺少 %q", want)
 		}
 	}
-	// 课程信息表：7 条、按 CourseID 排序、带 1..7 展示序号
-	if got := strings.Count(html, "<li>"); got != 7 {
+	// 课程信息表：7 条 <p>、按 CourseID 排序、带 1..7 展示序号
+	if got := strings.Count(html, `<p class="ci">`); got != 7 {
 		t.Errorf("课程信息表条目数 = %d, want 7", got)
 	}
 	for _, want := range []string{
 		`<span class="ci-no">1.</span> <span class="ci-name">Python程序设计(选修)</span>`,
 		`<span class="ci-no">3.</span> <span class="ci-name">高等数学A(上)</span>`,
 		`<span class="ci-no">7.</span> <span class="ci-name">线性代数</span>`,
+		`教师：王建国、李敏`,        // 同一课程多教师合并展示
+		`教室：教3-105、主M-201`, // 同一课程多教室合并展示
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("课程信息表缺少排序条目 %q", want)
 		}
 	}
-	// 信息表不渲染上课时间、不渲染"（简称）"括号注释
-	for _, forbid := range []string{"ci-times", "ci-note", "（高数A）", "上课时间"} {
+	// 课程信息不使用 <ol>/<li> 列表元素，改用 <p>
+	for _, forbid := range []string{"<ol", "<li>", "</li>", "ci-times", "ci-note", "（高数A）", "上课时间"} {
 		if strings.Contains(html, forbid) {
 			t.Errorf("课程信息表不应包含 %q", forbid)
 		}

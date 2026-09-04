@@ -79,11 +79,10 @@ func (s *Schedule) RenderHTML(w io.Writer) error {
   td.course.star { color: #555; }
   td.info-cell { border-left: ` + cssStrong + `; text-align: left; vertical-align: top; white-space: normal; }
   div.info-wrap { padding: 2px 8px 2px 2px; }
-  ol.course-list { margin: 0; padding-left: 20px; }
-  ol.course-list li { margin: 0 0 8px; font-size: 11px; }
+  p.ci { margin: 0 0 10px; font-size: 11px; text-align: left; }
   span.ci-no { font-weight: bold; }
   span.ci-name { font-weight: bold; }
-  span.ci-meta { color: #333; white-space: nowrap; }
+  .ci-line { color: #333; }
   .foot, .tip { text-align: center; font-size: 10px; margin-top: 6px; }
   @media print {
     body { margin: 0; }
@@ -154,24 +153,25 @@ func (s *Schedule) RenderHTML(w io.Writer) error {
 				b.WriteString("<h2 class=\"info-title\">课程信息</h2>")
 				infos := s.CourseInfos() // 已按 CourseID 字典序排序
 				if len(infos) == 0 {
-					b.WriteString("<div style=\"color:#666\">（本学期无课程）</div>")
+					b.WriteString("<p class=\"ci\">（本学期无课程）</p>")
 				} else {
-					b.WriteString("<ol class=\"course-list\">")
 					for i := range infos {
 						ci := &infos[i]
-						b.WriteString("<li>")
-						// 展示序号仅用于排序展示；数据中的 CourseID 不被改动
-						fmt.Fprintf(&b, "<span class=\"ci-no\">%d.</span> ", i+1)
-						fmt.Fprintf(&b, "<span class=\"ci-name\">%s</span>", esc(ci.Name))
-						if ci.Teacher != "" {
-							fmt.Fprintf(&b, " <span class=\"ci-meta\">｜%s</span>", esc(ci.Teacher))
+						// 每条课程信息用 <p>（左对齐）；不使用 <ol>/<li>，
+						// 序号为手写展示序号，排序依据 CourseID，不改动数据
+						b.WriteString("<p class=\"ci\">")
+						fmt.Fprintf(&b, "<span class=\"ci-no\">%d.</span> <span class=\"ci-name\">%s</span>",
+							i+1, esc(ci.Name))
+						if len(ci.Teachers) > 0 {
+							fmt.Fprintf(&b, "<br><span class=\"ci-line\">教师：%s</span>",
+								esc(strings.Join(ci.Teachers, "、")))
 						}
-						if ci.Location != "" {
-							fmt.Fprintf(&b, " <span class=\"ci-meta\">｜%s</span>", esc(ci.Location))
+						if len(ci.Locations) > 0 {
+							fmt.Fprintf(&b, "<br><span class=\"ci-line\">教室：%s</span>",
+								esc(strings.Join(ci.Locations, "、")))
 						}
-						b.WriteString("</li>")
+						b.WriteString("</p>")
 					}
-					b.WriteString("</ol>")
 				}
 				b.WriteString("</div></td>")
 			default: // 周二~周日的其余行：P/Q 已被上方信息表大格覆盖，无需输出

@@ -15,11 +15,13 @@ func NewSampleSchedule() *Schedule {
 		FirstMonday: time.Date(2026, time.September, 7, 0, 0, 0, 0, time.Local), // 第 1 周周一 = 9月7日
 		NumWeeks:    13,
 		Elements: []CourseElement{
-			// 高等数学：同一课程两个时间元素 → 课程信息表只显示一行
+			// 高等数学：同一课程两个时间元素 → 课程信息表只显示一行。
+			// 注意：周三的课由另一位老师（李敏）在另一个教室上——同一 CourseID
+			// 允许不同教师/教室（如分段授课、代课或换教室），右侧信息表会合并展示。
 			{CourseID: "M-101", Name: "高等数学A(上)", Teacher: "王建国",
 				Location: "教3-105", Weekday: Monday, StartSlot: 1, EndSlot: 2, WeekMask: weeks13},
-			{CourseID: "M-101", Name: "高等数学A(上)", Teacher: "王建国",
-				Location: "教3-105", Weekday: Wednesday, StartSlot: 3, EndSlot: 4, WeekMask: weeks13},
+			{CourseID: "M-101", Name: "高等数学A(上)", Teacher: "李敏",
+				Location: "主M-201", Weekday: Wednesday, StartSlot: 3, EndSlot: 4, WeekMask: weeks13},
 
 			// 线性代数：第 2-11 周（真实 ID 为非数字字符串示例）
 			{CourseID: "lin-alg-02", Name: "线性代数", Teacher: "赵明",
