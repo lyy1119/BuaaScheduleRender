@@ -1,10 +1,9 @@
-// Command render 把示例课表渲染成一个与《样本.xlsx》布局一致的网页表格，
-// 输出到指定的 HTML 文件。
+// Command render 把示例课表渲染为一个与《空课程表示例.xlsx》布局一致的静态网页，
+// 输出到指定的 HTML 文件。网页完全静态（纯 HTML+CSS，无脚本），可直接打印。
 //
 // 用法：
 //
 //	go run ./cmd/render -out schedule.html
-//	go run ./cmd/render -out schedule.html -location=false -teacher=true
 package main
 
 import (
@@ -18,8 +17,6 @@ import (
 
 func main() {
 	out := flag.String("out", "schedule.html", "输出的 HTML 文件路径")
-	showLocation := flag.Bool("location", true, "课程格内显示上课地点")
-	showTeacher := flag.Bool("teacher", false, "课程格内显示任课教师")
 	flag.Parse()
 
 	s := schedule.NewSampleSchedule()
@@ -33,10 +30,9 @@ func main() {
 	}
 	defer f.Close()
 
-	opts := schedule.RenderOptions{ShowLocation: *showLocation, ShowTeacher: *showTeacher}
-	if err := s.RenderHTML(f, opts); err != nil {
+	if err := s.RenderHTML(f); err != nil {
 		log.Fatalf("渲染失败: %v", err)
 	}
-	fmt.Printf("已生成课表网页: %s（第 1 周周一 %s，共 %d 周）\n",
-		*out, s.FirstMonday.Format("2006-01-02"), s.NumWeeks)
+	fmt.Printf("已生成课表网页: %s（第 1 周周一 %s，共 %d 周，课程数 %d）\n",
+		*out, s.FirstMonday.Format("2006-01-02"), s.NumWeeks, len(s.CourseInfos()))
 }

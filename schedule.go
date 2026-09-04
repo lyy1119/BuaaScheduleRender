@@ -1,30 +1,34 @@
-// Package schedule 建模"一个学期的课表"，其行列布局与仓库中《样本.xlsx》
-// 模板一致：
+// Package schedule 建模"一个学期的课表"，其行列布局与仓库中《空课程表示例.xlsx》
+// 一致：
 //
-//	列 = 周次（第 1..N 周），已知第 1 周周一的日期后可推算出每一周的周一日期；
-//	行 = 星期（一~日，每天固定 14 节）× 节次，附每节的标准起止时间。
-//	格 = 某一周 · 某一天 · 某一节是否有课。
+//	表头第 1 行：星期(A) | 周次 | 周次编号 1..N | 节次-时间表(P1:Q1)
+//	表头第 2 行：节次 | 每周周一的日期(渲染时依次补齐) | 节次/时间
+//	数据区   ：A 列星期(每 14 行合并) | B 列节次 | 周次 1..N 的课程格
+//	            P/Q 列 = 节次-时间表，仅在周一区段显示；
+//	            周二~周日 P17:Q100 区域渲染"课程信息表"。
 //
-// 课程按"课程元素"建模（一层一层嵌套在学期课表里）：
-// 一个元素 = 同一门课在【若干个周】的【某个星期几】的【连续若干节】出现。
-// 它出现的周的集合用二进制位掩码 WeekMask 记录：
+// 数据模型要点：
 //
-//	第 w 周有课  ⇔  WeekMask 的第 (w-1) 位为 1   （w 从 1 开始）
+//  1. 一门"真实课程"（如高等数学）一周可能有多段上课时间（周一 1-2 节、周三 3-4 节），
+//     每段上课时间存储为一个 CourseElement（课程元素）。元素共享 CourseID，
+//     并携带课程名、教师、教室等信息。注意：真实环境里 CourseID 是任意字符串
+//     （如 "MATH101"、"CSE-2026-1"），不是连续数字。
 //
-// 位掩码天然表达各种周型：
+//  2. 课程没有单独的"简称"字段：课表格空间有限，显示时按列宽预算对课程名做
+//     严格截断（见 FitName / CellNameBudget），数据中记录的始终是完整课程名。
 //
-//	1-3 周有课、第 4 周恰逢节假日停课、第 5 周恢复  → 位 0,1,2,4 置 1，位 3 为 0；
-//	单周 / 双周                                    → 奇/偶位分别置 1；
-//	整学期（模板 13 周）                           → 低 13 位全 1（0x1FFF）。
+//  3. 每段上课时间出现的周用二进制位掩码 WeekMask 记录：
+//     第 w 周有课 ⇔ 第 (w-1) 位为 1。第 4 周节假日停课只需让位 3 为 0。
 package schedule
 
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 )
 
-// 星期常量：1=周一 … 7=周日（与 Excel 模板 A 列顺序一致）。
+// 星期常量：1=周一 … 7=周日（与样本 A 列顺序一致）。
 const (
 	Monday = 1 + iota // 周一 = 1
 	Tuesday
@@ -38,10 +42,10 @@ const (
 // weekdayNames 将 Weekday 数值映射为中文"一~日"。
 var weekdayNames = [8]string{"", "一", "二", "三", "四", "五", "六", "日"}
 
-// SlotsPerDay 每天固定节数（与模板一致）。
+// SlotsPerDay 每天固定节数。
 const SlotsPerDay = 14
 
-// SlotTimes 每节课的标准时间（与模板 C 列一致）；下标 i 对应第 i+1 节。
+// SlotTimes 每节课的标准时间（与样本右侧"节次-时间表"一致）；下标 i 对应第 i+1 节。
 var SlotTimes = [SlotsPerDay]string{
 	"08:00-08:45", // 第 1 节
 	"08:50-09:35", // 第 2 节
@@ -59,33 +63,69 @@ var SlotTimes = [SlotsPerDay]string{
 	"21:30-22:15", // 第 14 节
 }
 
-// Course 是一个"课程元素"：同一门课在若干个周的某个星期几、
-// 从 StartSlot 到 EndSlot 的连续若干节次上课（1-2 节连堂即 StartSlot=1, EndSlot=2）。
-// 周集合用 WeekMask 位掩码记录；一格课程填格时，凡是掩码命中的周都出现该课程，
-// 未被命中的周（例如节假日那一周）该格为空——这正好对应"不是每周都有这门课"。
-type Course struct {
-	Name      string // 课程名称，必填
-	Weekday   int    // 星期几：Monday=1 … Sunday=7，必填
-	StartSlot int    // 起始节次：1..SlotsPerDay，必填
-	EndSlot   int    // 结束节次：StartSlot..SlotsPerDay，必填（单节课 EndSlot=StartSlot）
-	WeekMask  uint32 // 哪些周有课：第 w 周有课 ⇔ 第 (w-1) 位为 1；0 视为无课并报错
-	Location  string // 上课地点/教室，可选
-	Teacher   string // 任课教师，可选
+// 课表格字符预算的推导顺序（先定日期列宽，再限课程名长度）：
+//
+//	① 表头每周一日期最长为"月日双位数"，即 "12月31日"（6 个字符、视觉最宽）；
+//	② 各周次列的宽度按该最长日期设置，保证日期行永远单行、各列等宽；
+//	③ 同一列里的课程格内容宽度不能超过日期列宽，因此课程名只能显示一部分：
+//	   CellNameBudget = 最长日期的视觉余量（日期含 2 个全角汉字，课程名前缀为
+//	   半角节次号+空格，两者视觉宽度接近），课程名最多显示 CellNameBudget 个字符，
+//	   其余被严格截断——格子里有节次序号可定位，完整课程名在右侧"课程信息表"中。
+const (
+	// DateMaxText 是可能出现的日期最长文本（月、日均为两位数），用于锚定列宽。
+	DateMaxText = "12月31日"
+	// CellNameBudget 课表格中课程名最多显示的字符（rune）数。
+	CellNameBudget = 4
+)
+
+// FitName 将课程名严格截断为至多 budget 个字符（按 rune，中文/英文一视同仁）。
+// 它不做任何"另起别名"式的加工，只是直接截短；超出部分被丢弃，
+// 完整名称仍保存在数据中（课程信息表展示完整名称）。
+func FitName(name string, budget int) string {
+	r := []rune(name)
+	if budget <= 0 {
+		return ""
+	}
+	if len(r) <= budget {
+		return name
+	}
+	return string(r[:budget])
+}
+
+// CourseElement 是一段"上课时间元素"：同一门真实课程在若干个周的某个星期几、
+// 从 StartSlot 到 EndSlot 的连续若干节次上课（1-2 节连堂 = StartSlot 1、EndSlot 2）。
+// 同一门课的多段上课时间（周一 1-2 节、周三 3-4 节…）分别存储为不同元素，
+// 共享同一个 CourseID；元素冗余携带课程名/教师/教室信息。
+type CourseElement struct {
+	CourseID  string // 真实课程唯一 ID（任意字符串，非连续数字）
+	Name      string // 课程完整名称（数据中记录的就是它；简称仅由渲染时截断派生）
+	Teacher   string // 任课教师
+	Location  string // 上课地点/教室
+	Weekday   int    // 星期几：Monday=1 … Sunday=7
+	StartSlot int    // 起始节次：1..SlotsPerDay
+	EndSlot   int    // 结束节次：StartSlot..SlotsPerDay（单节课 EndSlot=StartSlot）
+	WeekMask  uint32 // 哪些周有课：第 w 周有课 ⇔ 第 (w-1) 位为 1
+}
+
+// CourseInfo 是按 CourseID 去重聚合后的一门"真实课程"（课程信息表的一行）。
+type CourseInfo struct {
+	CourseID string
+	Name     string
+	Teacher  string
+	Location string
 }
 
 // Schedule 是一个学期课表：已知第 1 周周一的日期 FirstMonday，
 // 第 w 周周一 = FirstMonday + 7×(w-1) 天，从而每一周的日期都可自动推算。
-// 行/列模板与《样本.xlsx》一致：列数 = NumWeeks，行 = 7 天 × SlotsPerDay 节。
 type Schedule struct {
-	Title       string    // 课表名称，例如"2026-2027学年第一学期课表"
-	FirstMonday time.Time // 学期第 1 周周一的日期（模板中为 9 月 7 号）
-	NumWeeks    int       // 学期周数（模板为 13），必须 ≥ 1
-	Courses     []Course  // 本学期全部课程元素
+	Title       string
+	FirstMonday time.Time // 学期第 1 周周一的日期（样本 9月7号）
+	NumWeeks    int       // 学期周数（样本为 13）
+	Elements    []CourseElement
 }
 
-// NewWeekMask 把周序号列表（从 1 开始）折叠成位掩码：
-//
-//	NewWeekMask(1, 2, 3, 5) → 第 1,2,3,5 周有课（第 4 周停课）
+// NewWeekMask 把周序号列表（从 1 开始）折叠成位掩码。
+// NewWeekMask(1, 2, 3, 5) → 第 1,2,3,5 周有课（第 4 周停课）。
 func NewWeekMask(weeks ...int) uint32 {
 	var m uint32
 	for _, w := range weeks {
@@ -96,21 +136,19 @@ func NewWeekMask(weeks ...int) uint32 {
 	return m
 }
 
-// HasWeek 报告该课程在第 w 周是否有课（位掩码判断，渲染时即用它逐周探测）。
-func (c *Course) HasWeek(w int) bool {
-	return w >= 1 && c.WeekMask&(1<<(w-1)) != 0
+// HasWeek 报告该元素在第 w 周是否有课（位掩码判断）。
+func (e *CourseElement) HasWeek(w int) bool {
+	return w >= 1 && e.WeekMask&(1<<(w-1)) != 0
 }
 
 // WeekStart 返回第 w 周周一的日期（w 从 1 开始）。
-// 由 FirstMonday 每 7 天推进一次得到，例如第 1 周 9/7、第 2 周 9/14、第 13 周 11/30。
 func (s *Schedule) WeekStart(w int) time.Time {
 	return s.FirstMonday.AddDate(0, 0, 7*(w-1))
 }
 
-// Validate 检查课表数据的一致性，任何问题都会给出带定位信息的错误：
-// 学期参数、每门课程的字段合法性、掩码是否超出学期周数，
-// 以及最关键的——同一（周、星期、节次）格子是否被多门课占用（冲突）。
-// 渲染前应调用它。
+// Validate 检查数据一致性：字段合法性、掩码是否超出学期周数、
+// 同一 CourseID 的多个元素信息是否一致，以及不同元素的时间是否冲突
+// （同一 周×星期×节次 格子最多只能被一个元素占用）。
 func (s *Schedule) Validate() error {
 	if s.NumWeeks < 1 {
 		return errors.New("schedule: NumWeeks 必须 ≥ 1")
@@ -118,40 +156,81 @@ func (s *Schedule) Validate() error {
 	if s.FirstMonday.IsZero() {
 		return errors.New("schedule: 必须设置 FirstMonday（第 1 周周一的日期）")
 	}
-	seen := map[[3]int]string{} // {周, 星期, 节次} → 课程名
-	for i := range s.Courses {
-		c := &s.Courses[i]
-		if c.Name == "" {
-			return fmt.Errorf("课程 #%d: 课程名不能为空", i+1)
+	seen := map[[3]int]string{} // {周, 星期, 节次} → 元素所属课程 ID（冲突检测）
+	for i := range s.Elements {
+		e := &s.Elements[i]
+		if e.CourseID == "" {
+			return fmt.Errorf("课程元素 #%d: CourseID 不能为空", i+1)
 		}
-		if c.Weekday < Monday || c.Weekday > Sunday {
-			return fmt.Errorf("课程 %q: Weekday=%d 超出 1..7", c.Name, c.Weekday)
+		if e.Name == "" {
+			return fmt.Errorf("课程元素 #%d (%s): 课程名不能为空", i+1, e.CourseID)
 		}
-		if c.StartSlot < 1 || c.StartSlot > SlotsPerDay {
-			return fmt.Errorf("课程 %q: StartSlot=%d 超出 1..%d", c.Name, c.StartSlot, SlotsPerDay)
+		if e.Weekday < Monday || e.Weekday > Sunday {
+			return fmt.Errorf("课程 %q: Weekday=%d 超出 1..7", e.Name, e.Weekday)
 		}
-		if c.EndSlot < c.StartSlot || c.EndSlot > SlotsPerDay {
-			return fmt.Errorf("课程 %q: EndSlot=%d 不在 [StartSlot=%d, %d]", c.Name, c.EndSlot, c.StartSlot, SlotsPerDay)
+		if e.StartSlot < 1 || e.StartSlot > SlotsPerDay {
+			return fmt.Errorf("课程 %q: StartSlot=%d 超出 1..%d", e.Name, e.StartSlot, SlotsPerDay)
 		}
-		if c.WeekMask == 0 {
-			return fmt.Errorf("课程 %q: WeekMask 为 0（没有任何一周有课）", c.Name)
+		if e.EndSlot < e.StartSlot || e.EndSlot > SlotsPerDay {
+			return fmt.Errorf("课程 %q: EndSlot=%d 不在 [StartSlot=%d, %d]", e.Name, e.EndSlot, e.StartSlot, SlotsPerDay)
 		}
-		if c.WeekMask>>s.NumWeeks != 0 {
-			return fmt.Errorf("课程 %q: 周掩码包含了超出学期周数 NumWeeks=%d 的周", c.Name, s.NumWeeks)
+		if e.WeekMask == 0 {
+			return fmt.Errorf("课程 %q: WeekMask 为 0（没有任何一周有课）", e.Name)
+		}
+		if e.WeekMask>>s.NumWeeks != 0 {
+			return fmt.Errorf("课程 %q: 周掩码包含了超出学期周数 NumWeeks=%d 的周", e.Name, s.NumWeeks)
 		}
 		for w := 1; w <= s.NumWeeks; w++ {
-			if !c.HasWeek(w) {
+			if !e.HasWeek(w) {
 				continue
 			}
-			for slot := c.StartSlot; slot <= c.EndSlot; slot++ {
-				key := [3]int{w, c.Weekday, slot}
+			for slot := e.StartSlot; slot <= e.EndSlot; slot++ {
+				key := [3]int{w, e.Weekday, slot}
 				if prev, dup := seen[key]; dup {
-					return fmt.Errorf("格子冲突：第 %d 周 周%s 第 %d 节同时有 %q 与 %q",
-						w, weekdayNames[c.Weekday], slot, prev, c.Name)
+					return fmt.Errorf("格子冲突：第 %d 周 周%s 第 %d 节 课程 %q 与 %q 时间重叠",
+						w, weekdayNames[e.Weekday], slot, prev, e.CourseID)
 				}
-				seen[key] = c.Name
+				seen[key] = e.CourseID
 			}
 		}
 	}
+	// 同一 CourseID 的元素必须携带一致的课程名/教师/教室。
+	base := map[string]CourseElement{}
+	for i := range s.Elements {
+		e := &s.Elements[i]
+		if prev, ok := base[e.CourseID]; ok {
+			if prev.Name != e.Name || prev.Teacher != e.Teacher || prev.Location != e.Location {
+				return fmt.Errorf("课程 %q: 同一 CourseID 的不同元素携带了不一致的课程信息(课名/教师/教室)",
+					e.CourseID)
+			}
+		} else {
+			base[e.CourseID] = *e
+		}
+	}
 	return nil
+}
+
+// CourseInfos 按 CourseID 去重聚合全部真实课程，返回课程信息表的行数据。
+// 由于真实 CourseID 是任意字符串（非连续数字），这里用一个简单、稳定、
+// 快速的规则决定课程顺序：按 CourseID 的字符串字典序升序排列；
+// 渲染层再按该顺序显示 1、2、3… 展示序号，数据中记录的 CourseID 不受任何影响。
+func (s *Schedule) CourseInfos() []CourseInfo {
+	byID := map[string]CourseInfo{}
+	for i := range s.Elements {
+		e := &s.Elements[i]
+		if _, ok := byID[e.CourseID]; !ok {
+			byID[e.CourseID] = CourseInfo{
+				CourseID: e.CourseID,
+				Name:     e.Name,
+				Teacher:  e.Teacher,
+				Location: e.Location,
+			}
+		}
+	}
+	out := make([]CourseInfo, 0, len(byID))
+	for _, ci := range byID {
+		out = append(out, ci)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CourseID < out[j].CourseID })
+	return out
 }

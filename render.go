@@ -7,42 +7,53 @@ import (
 	"strings"
 )
 
-// RenderOptions 控制渲染细节。
-type RenderOptions struct {
-	ShowLocation bool // 课程格内是否追加显示上课地点（换行显示）
-	ShowTeacher  bool // 课程格内是否追加显示任课教师（换行显示）
-}
+// 版式与框线规则（不追求与 Excel 逐磅一致，重在层次对比）：
+//   - 主表外框 2px 粗线；表头(周次/日期行)下沿 2px 粗线；
+//   - 网格内部一律 1px 细线；课程格区域与右侧"节次-时间表/课程信息表"之间
+//     的竖向分隔用 2px 粗线；右侧信息区内部不画网格线；
+//   - 列宽由"最长日期"（月、日双位数，如 12月31日）锚定，日期表头强制单行，
+//     课程名按同一列宽预算严格截断（CellNameBudget），保证课程格也不折行。
+const (
+	cssThin   = "1px solid #000"
+	cssStrong = "2px solid #000"
+	// 各周次列宽度(px)：需容纳 DateMaxText("12月31日") 单行显示。
+	weekColWidthPx = 62
+)
 
-// cellText 计算某一（周、星期、节次）格子的显示内容：
-// 在该 (day, slot) 上课、且位掩码命中第 week 周的课程名称；
-// 若 ShowLocation/ShowTeacher 打开则追加地点与教师。无课时返回空串。
-func (s *Schedule) cellText(week, weekday, slot int, o RenderOptions) string {
-	for i := range s.Courses {
-		c := &s.Courses[i]
-		if c.Weekday != weekday || slot < c.StartSlot || slot > c.EndSlot || !c.HasWeek(week) {
+// cellInfo 返回某一（周、星期、节次）格子命中的元素及其显示文本；无课则空。
+// 文本规则：
+//
+//	起始节次格 → "{起始节次} {FitName(课程名)}"（课名按列宽预算严格截断）
+//	连堂后续节次格 → "*"
+func (s *Schedule) cellInfo(week, weekday, slot int) (string, *CourseElement) {
+	for i := range s.Elements {
+		e := &s.Elements[i]
+		if e.Weekday != weekday || !e.HasWeek(week) || slot < e.StartSlot || slot > e.EndSlot {
 			continue
 		}
-		parts := []string{c.Name}
-		if o.ShowLocation && c.Location != "" {
-			parts = append(parts, c.Location)
+		if slot == e.StartSlot {
+			return fmt.Sprintf("%d %s", slot, FitName(e.Name, CellNameBudget)), e
 		}
-		if o.ShowTeacher && c.Teacher != "" {
-			parts = append(parts, c.Teacher)
-		}
-		return strings.Join(parts, "<br>")
+		return "*", e
 	}
-	return ""
+	return "", nil
 }
 
-// RenderHTML 把课表渲染成一个完整、自包含（内嵌 CSS）的 HTML 文档写入 w。
-// 表格布局与《样本.xlsx》逐格一致：
+// CellText 是 cellInfo 的公开文本版。
+func (s *Schedule) CellText(week, weekday, slot int) string {
+	t, _ := s.cellInfo(week, weekday, slot)
+	return t
+}
+
+// RenderHTML 把课表渲染成一个完整、自包含（内嵌 CSS）、零脚本的静态 HTML 文档。
+// 页面结构：
 //
-//	第 1 行表头：周次列名 + 第 1..NumWeeks 周的编号；
-//	第 2 行表头：星期 / 节次 / 时间 + 每一周对应的【周一日期】（由 FirstMonday 依次推进）；
-//	数据区：每天一个 14 行的块（星期列用 rowspan=14 视觉合并，同模板 A 列合并），
-//	每行依次是节次、该节时间，以及每个周次列的一个格子。
-//	某周停课（掩码该位为 0）时对应格子为空。
-func (s *Schedule) RenderHTML(w io.Writer, o RenderOptions) error {
+//	① 主课表网格（与《空课程表示例.xlsx》一致）：A 星期 | B 节次 | 周次课程格，
+//	   右侧 P/Q 为"节次-时间表"（仅周一区段出现）。
+//	② 周二~周日右侧的 P17:Q100 区域放置"课程信息表"：课程按 CourseID 字典序
+//	   排列并显示 1、2、3… 序号，每条只含完整课程名/教师/教室（不含上课时间，
+//	   课名记录的就是全名，不做另起别名式的简称）。
+func (s *Schedule) RenderHTML(w io.Writer) error {
 	if err := s.Validate(); err != nil {
 		return fmt.Errorf("渲染被拒绝：课表数据不合法: %w", err)
 	}
@@ -51,59 +62,125 @@ func (s *Schedule) RenderHTML(w io.Writer, o RenderOptions) error {
 	var b strings.Builder
 	b.WriteString("<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"UTF-8\">\n")
 	fmt.Fprintf(&b, "<title>%s</title>\n", esc(s.Title))
-	// 样式刻意保持朴素：黑白、细实线边框、清晰可辨；
-	// 无任何脚本，纯静态页面，浏览器中直接 Ctrl+P（建议横向）即可打印，
-	// @page 默认 A4 横向，打印预览里可切换 A3。
 	b.WriteString(`<style>
   body { font-family: "Microsoft YaHei", "SimSun", "PingFang SC", sans-serif; margin: 16px; color: #000; }
-  h1 { font-size: 18px; text-align: center; margin: 0 0 10px; }
-  table { border-collapse: collapse; margin: 0 auto; font-size: 9px; }
-  th, td { border: 1px solid #000; padding: 1px 4px; text-align: center; vertical-align: middle; }
+  h1 { font-size: 20px; text-align: center; margin: 0 0 10px; }
+  h2.info-title { font-size: 13px; margin: 2px 0 6px; text-align: center; }
+  table { border-collapse: collapse; font-size: 11px; }
+  table#main { margin: 0 auto; border: ` + cssStrong + `; }
+  table#main th, table#main td { border: ` + cssThin + `; padding: 1px 3px; text-align: center; white-space: nowrap; }
   thead { display: table-header-group; }
-  th { background: #eee; font-weight: bold; }
-  td.weekday { background: #eee; font-weight: bold; min-width: 18px; }
-  td.slot { font-weight: normal; }
-  td.time { white-space: nowrap; }
+  thead th { background: #f0f0f0; font-weight: bold; }
+  thead tr:nth-child(2) th { border-bottom: ` + cssStrong + `; }
+  td.weekday { background: #f0f0f0; font-weight: bold; min-width: 22px; }
+  td.time { font-size: 10px; }
+  td.ps { border-left: ` + cssStrong + `; }   /* 时间表/信息表与课程格的竖向粗分隔 */
+  td.course { overflow: hidden; }              /* 课程格不折行，超出被列宽裁切 */
+  td.course.star { color: #555; }
+  td.info-cell { border-left: ` + cssStrong + `; text-align: left; vertical-align: top; white-space: normal; }
+  div.info-wrap { padding: 2px 8px 2px 2px; }
+  ol.course-list { margin: 0; padding-left: 20px; }
+  ol.course-list li { margin: 0 0 8px; font-size: 11px; }
+  span.ci-no { font-weight: bold; }
+  span.ci-name { font-weight: bold; }
+  span.ci-meta { color: #333; white-space: nowrap; }
   .foot, .tip { text-align: center; font-size: 10px; margin-top: 6px; }
   @media print {
     body { margin: 0; }
     @page { size: A4 landscape; margin: 8mm; }
     tr { page-break-inside: avoid; }
+    table#main { font-size: 8.5px; }
   }
 </style>`)
 	b.WriteString("</head>\n<body>\n")
 	fmt.Fprintf(&b, "<h1>%s</h1>\n", esc(s.Title))
 
-	b.WriteString("<table>\n<thead>\n<tr>")
-	b.WriteString("<th colspan=\"2\"></th><th>周次</th>")
+	// ---------- 主课表 ----------
+	b.WriteString("<table id=\"main\">\n<colgroup>")
+	// A..Q：A 星期 | B 节次 | C.. 周次（13 列等宽，锚定最长日期）| P 节次 | Q 时间
+	b.WriteString("<col style=\"width:24px\"><col style=\"width:20px\">")
+	for w := 1; w <= s.NumWeeks; w++ {
+		fmt.Fprintf(&b, "<col style=\"width:%dpx\">", weekColWidthPx)
+	}
+	b.WriteString("<col style=\"width:24px\"><col style=\"width:88px\">")
+	b.WriteString("</colgroup>\n<thead>\n<tr>")
+	// 表头第 1 行：星期(A, 跨 2 行) | 周次(B1) | 周次编号 1..13(C1..O1) | 节次-时间表(P1:Q1)
+	b.WriteString("<th rowspan=\"2\">星期</th><th>周次</th>")
 	for w := 1; w <= s.NumWeeks; w++ {
 		fmt.Fprintf(&b, "<th>%d</th>", w)
 	}
+	b.WriteString("<th colspan=\"2\">节次-时间表</th>")
 	b.WriteString("</tr>\n<tr>")
-	b.WriteString("<th>星期</th><th>节次</th><th>时间</th>")
+	// 表头第 2 行：节次(B2) | 每周一日期(C2..O2，依次补齐、强制单行) | 节次(P2)/时间(Q2)
+	b.WriteString("<th>节次</th>")
 	for w := 1; w <= s.NumWeeks; w++ {
-		fmt.Fprintf(&b, "<th class=\"date\">%s</th>", esc(s.WeekStart(w).Format("1月2日")))
+		fmt.Fprintf(&b, "<th>%s</th>", esc(s.WeekStart(w).Format("1月2日")))
 	}
+	b.WriteString("<th class=\"ps\">节次</th><th class=\"ps time\">时间</th>")
 	b.WriteString("</tr>\n</thead>\n<tbody>\n")
 
 	for day := Monday; day <= Sunday; day++ {
 		for slot := 1; slot <= SlotsPerDay; slot++ {
 			b.WriteString("<tr>")
-			if slot == 1 { // 每天第一个节次行输出星期标签，rowspan 视觉合并 14 行
+			if slot == 1 {
 				fmt.Fprintf(&b, "<td class=\"weekday\" rowspan=\"%d\">%s</td>", SlotsPerDay, weekdayNames[day])
 			}
-			fmt.Fprintf(&b, "<td class=\"slot\">%d</td><td class=\"time\">%s</td>", slot, SlotTimes[slot-1])
+			fmt.Fprintf(&b, "<td>%d</td>", slot)
 			for w := 1; w <= s.NumWeeks; w++ {
-				if text := s.cellText(w, day, slot, o); text != "" {
-					fmt.Fprintf(&b, "<td class=\"course\">%s</td>", text)
-				} else {
-					b.WriteString("<td></td>")
+				text, el := s.cellInfo(w, day, slot)
+				switch {
+				case text == "":
+					b.WriteString("<td class=\"course\"></td>")
+				case text == "*":
+					b.WriteString("<td class=\"course star\">*</td>")
+				default:
+					title := el.Name
+					if el.Teacher != "" {
+						title += "｜" + el.Teacher
+					}
+					if el.Location != "" {
+						title += "｜" + el.Location
+					}
+					fmt.Fprintf(&b, "<td class=\"course\" title=\"%s\">%s</td>", esc(title), esc(text))
 				}
+			}
+			switch {
+			case day == Monday: // 周一区段：右侧显示节次-时间表
+				fmt.Fprintf(&b, "<td class=\"ps\">%d</td><td class=\"ps time\">%s</td>", slot, SlotTimes[slot-1])
+			case day == Tuesday && slot == 1:
+				// 周二~周日右侧 P17:Q100 区域：合并大格，内嵌"课程信息表"
+				fmt.Fprintf(&b, "<td class=\"info-cell\" colspan=\"2\" rowspan=\"%d\">", 6*SlotsPerDay)
+				b.WriteString("<div class=\"info-wrap\">")
+				b.WriteString("<h2 class=\"info-title\">课程信息</h2>")
+				infos := s.CourseInfos() // 已按 CourseID 字典序排序
+				if len(infos) == 0 {
+					b.WriteString("<div style=\"color:#666\">（本学期无课程）</div>")
+				} else {
+					b.WriteString("<ol class=\"course-list\">")
+					for i := range infos {
+						ci := &infos[i]
+						b.WriteString("<li>")
+						// 展示序号仅用于排序展示；数据中的 CourseID 不被改动
+						fmt.Fprintf(&b, "<span class=\"ci-no\">%d.</span> ", i+1)
+						fmt.Fprintf(&b, "<span class=\"ci-name\">%s</span>", esc(ci.Name))
+						if ci.Teacher != "" {
+							fmt.Fprintf(&b, " <span class=\"ci-meta\">｜%s</span>", esc(ci.Teacher))
+						}
+						if ci.Location != "" {
+							fmt.Fprintf(&b, " <span class=\"ci-meta\">｜%s</span>", esc(ci.Location))
+						}
+						b.WriteString("</li>")
+					}
+					b.WriteString("</ol>")
+				}
+				b.WriteString("</div></td>")
+			default: // 周二~周日的其余行：P/Q 已被上方信息表大格覆盖，无需输出
 			}
 			b.WriteString("</tr>\n")
 		}
 	}
 	b.WriteString("</tbody>\n</table>\n")
+
 	fmt.Fprintf(&b, "<p class=\"foot\">第 1 周周一起始日期：%s，共 %d 周</p>\n",
 		esc(s.FirstMonday.Format("2006年1月2日")), s.NumWeeks)
 	b.WriteString("<p class=\"tip\">打印提示：浏览器中按 Ctrl+P，纸张建议 A4（或 A3）横向，缩放可调。</p>\n")
