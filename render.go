@@ -42,20 +42,20 @@ type RenderOptions struct {
 }
 
 // sheetClass 根据方向返回 div.sheet 使用的 class。
-func (o RenderOptions) sheetClass() string {
-	if o.Portrait {
-		return "sheet portrait"
-	}
-	return "sheet landscape"
-}
+// func (o RenderOptions) sheetClass() string {
+// 	if o.Portrait {
+// 		return "sheet portrait"
+// 	}
+// 	return "sheet landscape"
+// }
 
-// pageCSS 根据方向返回 @page 规则（A4 横/纵）。
-func (o RenderOptions) pageCSS() string {
-	if o.Portrait {
-		return "@page { size: A4 portrait; margin: 8mm; }"
-	}
-	return "@page { size: A4 landscape; margin: 8mm; }"
-}
+// // pageCSS 根据方向返回 @page 规则（A4 横/纵）。
+// func (o RenderOptions) pageCSS() string {
+// 	if o.Portrait {
+// 		return "@page { size: A4 portrait; margin: 8mm; }"
+// 	}
+// 	return "@page { size: A4 landscape; margin: 8mm; }"
+// }
 
 // cellInfo 返回某一（周、星期、节次）格子命中的元素及其显示文本；无课则空。
 // 文本规则：
@@ -99,30 +99,16 @@ func (s *Schedule) RenderHTML(w io.Writer, opts RenderOptions) error {
 	esc := func(v string) string { return template.HTMLEscapeString(v) }
 
 	orient := "横向"
-	if opts.Portrait {
-		orient = "纵向"
-	}
 
 	var b strings.Builder
 	b.WriteString("<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"UTF-8\">\n")
 	fmt.Fprintf(&b, "<title>%s</title>\n", esc(s.Title))
 	b.WriteString("<style>\n")
 	// @page 必须位于样式顶层（不能嵌在 @media print 内），按方向动态输出
-	fmt.Fprintf(&b, "  /* 打印纸张方向：%s */\n  %s\n", esc(orient), opts.pageCSS())
-	b.WriteString(`  html, body { margin: 0; padding: 0; }
-  body { background: #f2f2f2; font-family: "Microsoft YaHei", "SimSun", "PingFang SC", sans-serif; color: #000; }
-  /* 比例容器：screen 上最大宽度由视口高度 × 宽高比推出（翻转=竖版更窄） */
-  div.sheet {
-    --rr: 1.414;
-    margin: 10px auto;
-    width: 100%;
-    max-width: min(100%, calc((100vh - 28px) * var(--rr)));
-    background: #fff;
-    box-sizing: border-box;
-    border: 1px solid #bbb;
-    padding: 8px 14px;
-  }
-  div.sheet.portrait { max-width: min(100%, calc((100vh - 28px) / var(--rr))); }
+	// fmt.Fprintf(&b, "  /* 打印纸张方向：%s */\n  %s\n", esc(orient), opts.pageCSS())
+	b.WriteString(`  .page { width: 297mm; height: 210mm; margin: 10mm auto; padding: 6mm; overflow:hidden; background: white; }
+  html, body { margin: 0; padding: 0; }
+  body { background: #eeeeee; font-family: "Microsoft YaHei", Arial, sans-serif; color: #000; }
   h1 { font-size: 18px; text-align: center; margin: 0 0 8px; }
   h2.info-title { font-size: 12px; margin: 0 0 6px; text-align: center; }
   table { border-collapse: collapse; font-size: 11px; }
@@ -154,15 +140,17 @@ func (s *Schedule) RenderHTML(w io.Writer, opts RenderOptions) error {
 </style>`)
 	b.WriteString("</head>\n<body>\n")
 	// ---------- 比例容器：包住整份课表 ----------
-	fmt.Fprintf(&b, "<div class=\"%s\">\n", esc(opts.sheetClass()))
+	b.WriteString("<div class=\"page\">\n")
 	fmt.Fprintf(&b, "<h1>%s</h1>\n", esc(s.Title))
 
 	// ---------- 主课表 ----------
+	// 行宽限制
 	b.WriteString("<table id=\"main\">\n<colgroup>")
 	for _, p := range mainColPcts {
 		fmt.Fprintf(&b, "<col style=\"width:%.4g%%\">", p)
 	}
 	b.WriteString("</colgroup>\n<thead>\n<tr>")
+
 	// 表头第 1 行：星期(A, 跨 2 行) | 周次(B1) | 周次编号 1..N(C1..) | 节次-时间表(P1:Q1)
 	b.WriteString("<th rowspan=\"2\">星期</th><th>周次</th>")
 	for w := 1; w <= s.NumWeeks; w++ {
