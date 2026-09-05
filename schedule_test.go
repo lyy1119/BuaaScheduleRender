@@ -218,6 +218,11 @@ func TestRenderHTML(t *testing.T) {
 		t.Errorf(`"1 高等数学" 出现 %d 次, want 13`, got)
 	}
 	// 主表列宽分配：17 列且百分比合计约为 100%（保证 fixed 布局下不溢出）
+	var mainColPcts = []float64{
+		2.8, 2.8, // A 星期, B 节次
+		5.6, 5.6, 5.6, 5.6, 5.6, 5.6, 5.6, 5.6, 5.6, 5.6, 5.6, 5.6, 5.6, // 周次 ×13
+		3.0, 20.0, // P 节次, Q 时间/课程信息
+	}
 	if len(mainColPcts) != 17 {
 		t.Errorf("mainColPcts 长度 = %d, want 17", len(mainColPcts))
 	}
