@@ -21,7 +21,7 @@ const (
 
 	// 单元格行模型：表格 14 节 × 7 天 + 2 个表头行 = 100 行；标题另占 2 行。
 	tableCellRows = SlotsPerDay*7 + 2
-	titleCellRows = 2
+	titleCellRows = 1.5
 	// 单元格宽度模型：星期列/节次列各 0.5 格，周次列每列 1 格，
 	// 右侧节次-时间表的节次列 0.5 格、时间列最少 2 格（其余空白自动补全）。
 	cellWDayCol   = 0.5 // 星期列（A）
@@ -108,6 +108,7 @@ func (s *Schedule) calcLayout(portrait bool) layout {
 		ly.fontMM = fsW
 		ly.cellWMM = w0
 	}
+	ly.fontMM *= 0.85
 
 	// 各列宽（mm）：A/B/P 半格、周次列整格；Q = 右侧自动补全（≥ 2 格）
 	half := ly.cellWMM / 2
@@ -131,7 +132,7 @@ func (s *Schedule) calcLayout(portrait bool) layout {
 	// 行高（供信息区文本等使用，与单元格等高；以百分比 = 相对字号）
 	ly.lineHMM = ly.cellHMM
 	// 标题字号略小于两格高度以便垂直居中，允许与正文不同
-	ly.titleFontMM = ly.cellHMM * 2 * 0.85
+	ly.titleFontMM = ly.titleHMM * 0.85
 	return ly
 }
 
@@ -177,12 +178,12 @@ func (s *Schedule) RenderHTML(w io.Writer, opts RenderOptions) error {
 	b.WriteString("<style>\n")
 	// .page：整页固定为 A4 纸张尺寸（默认横向，Portrait 翻转纵向），内边距 6mm。
 	// box-sizing:border-box 使内容可用区 = 纸面 − 12mm，与版式计算一致。
-	fmt.Fprintf(&b, "  .page { width: %.1fmm; height: %.1fmm; margin: 10mm auto; padding: %.1fmm; overflow: hidden; box-sizing: border-box; background: white; }\n",
+	fmt.Fprintf(&b, "  .page { width: %.1fmm; height: %.1fmm; margin: 0mm auto; padding: %.1fmm; overflow: hidden; box-sizing: border-box; background: white; }\n",
 		ly.pageWMM, ly.pageHMM, pagePadMM)
 	fmt.Fprintf(&b, "  html, body { margin: 0; padding: 0; }\n")
 	fmt.Fprintf(&b, "  body { background: #eeeeee; font-family: 'Microsoft YaHei', Arial, sans-serif; color: #000; font-size: %.3fmm; }\n", ly.fontMM)
 	// 标题占 2 个单元格高度，字号独立于正文
-	fmt.Fprintf(&b, "  h1 { height: %.3fmm; line-height: %.3fmm; font-size: %.3fmm; margin: 0; text-align: center; overflow: hidden; }\n",
+	fmt.Fprintf(&b, "  h1 { height: %.3fmm; line-height: %.3fmm; font-size: %.3fmm; margin: 0; text-align: left; overflow: hidden; }\n",
 		ly.titleHMM, ly.titleHMM, ly.titleFontMM)
 	b.WriteString("  h2.info-title { font-size: 1em; margin: 0 0 0.2mm; text-align: center; font-weight: bold; }\n")
 	b.WriteString("  table { border-collapse: collapse; }\n")
@@ -201,7 +202,7 @@ func (s *Schedule) RenderHTML(w io.Writer, opts RenderOptions) error {
 	b.WriteString("  td.course.star { color: #555; }\n")
 	// 右侧课程信息大格：宽度受容器约束、超宽自动换行；行高与单元格等高
 	b.WriteString("  td.info-cell { border-left: " + cssStrong + "; height: auto; text-align: left; vertical-align: top; white-space: normal; word-break: break-word; overflow-wrap: break-word; }\n")
-	b.WriteString("  div.info-wrap { padding: 0 0.5mm 0 0.2mm; }\n")
+	b.WriteString("  div.info-wrap { padding: 0 0.5mm 0 0.2mm; text-align: left; }\n")
 	fmt.Fprintf(&b, "  p.ci { margin: 0 0 %.3fmm; line-height: %.3fmm; text-align: left; white-space: normal; word-break: break-word; }\n",
 		ly.cellHMM, ly.lineHMM)
 	b.WriteString("  span.ci-no { font-weight: bold; }\n")
