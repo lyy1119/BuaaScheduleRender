@@ -293,3 +293,10 @@ func TestRenderHTMLPortrait(t *testing.T) {
 		t.Error("竖版渲染不应使用横向纸张尺寸")
 	}
 }
+
+// TestDefaultRenderOptions 验证默认渲染方向为 A4 竖向。
+func TestDefaultRenderOptions(t *testing.T) {
+	if !DefaultRenderOptions().Portrait {
+		t.Error("默认渲染方向应为 A4 竖向（Portrait=true）")
+	}
+}

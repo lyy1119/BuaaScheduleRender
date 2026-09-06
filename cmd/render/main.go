@@ -1,6 +1,8 @@
 // Command render 把课表渲染为一个静态网页 HTML 文件输出到指定路径。
 // 网页完全静态（纯 HTML+CSS，无脚本），可直接打印。
 //
+// 默认方向为 A4 竖向；如需横向加 -landscape。
+//
 // 数据源（三选一，优先级 url > data > 内置示例）：
 //
 //	go run ./cmd/render -url  http://10.124.37.11:8778/ -out schedule.html   // 拉取教务接口
@@ -10,7 +12,7 @@
 // 其它选项：
 //
 //	-first "2026-09-07"   学期第 1 周周一的日期（源数据不含时必填）
-//	-portrait             竖版打印（A4 纵向）
+//	-landscape            横向打印（A4 横向；默认竖向）
 package main
 
 import (
@@ -26,7 +28,7 @@ import (
 
 func main() {
 	out := flag.String("out", "schedule.html", "输出的 HTML 文件路径")
-	portrait := flag.Bool("portrait", false, "竖版打印（A4 纵向）")
+	landscape := flag.Bool("landscape", false, "横向打印（A4 横向；默认竖向）")
 	dataFile := flag.String("data", "", "教务 JSON 文件路径（testdata/loadXskbData.json 等）")
 	dataURL := flag.String("url", "", "教务数据地址（http://10.124.37.11:8778/）")
 	first := flag.String("first", "2026-09-07", "学期第 1 周周一的日期 YYYY-MM-DD")
@@ -73,13 +75,14 @@ func main() {
 	}
 	defer f.Close()
 
-	opts := schedule.RenderOptions{Portrait: *portrait}
+	// 默认竖向打印；-landscape 时切换为横向
+	opts := schedule.RenderOptions{Portrait: !*landscape}
 	if err := s.RenderHTML(f, opts); err != nil {
 		log.Fatalf("渲染失败: %v", err)
 	}
-	orient := "横向"
-	if *portrait {
-		orient = "纵向"
+	orient := "纵向"
+	if *landscape {
+		orient = "横向"
 	}
 	fmt.Printf("已生成课表网页: %s（标题 %q，第 1 周周一 %s，共 %d 周，课程 %d 门，版面 A4 %s）\n",
 		*out, s.Title, s.FirstMonday.Format("2006-01-02"), s.NumWeeks, len(s.CourseInfos()), orient)

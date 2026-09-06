@@ -36,8 +36,15 @@ const (
 
 // RenderOptions 控制渲染版式。
 type RenderOptions struct {
-	// Portrait 为 true 时页面翻转为 A4 纵向（210×297mm），用于竖着打印。
+	// Portrait 为 true 时页面为 A4 纵向（210×297mm，竖着打印）；
+	// false 时为 A4 横向（297×210mm）。
 	Portrait bool
+}
+
+// DefaultRenderOptions 返回默认版式：A4 竖向打印。
+// （在命令行中直接使用 RenderOptions{Portrait: true}，避免零值误为横向。）
+func DefaultRenderOptions() RenderOptions {
+	return RenderOptions{Portrait: true}
 }
 
 // layout 是一份 A4 页面全部版式参数（同时由同一套计算得出，先 mm 后换算百分比）。
