@@ -166,7 +166,8 @@ func (c *Client) postData(ctx context.Context, semester string) ([]byte, error) 
 		return nil, err
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
-		return body, fmt.Errorf("未授权（HTTP 401），需要登录")
+		// 会话未登录/失效：返回空会话信号，由 FetchJSON 触发自动登录后重试
+		return body, nil
 	}
 	if resp.StatusCode != http.StatusOK {
 		return body, fmt.Errorf("请求课表数据返回 HTTP %d", resp.StatusCode)
