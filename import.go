@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -59,8 +60,54 @@ type xskbEnvelope struct {
 
 type xskbRWRecord struct {
 	XNXQMC string `json:"XNXQMC"` // 学年学期名，如 "2026-2027学年 第一学期"
+	KCDM   string `json:"KCDM"`
 	KCMC   string `json:"KCMC"`
 	BJMC   string `json:"BJMC"`
+	RKJS   string `json:"RKJS"`   // 任课教师（逗号分隔，已按课程聚合）
+	PKSJDD string `json:"PKSJDD"` // 排课地点时间描述（"周次 星期[节次]教室;…"）
+	XQMC   string `json:"XQMC"`   // 校区名
+	KKDWMC string `json:"KKDWMC"` // 开课单位
+}
+
+// courseInfosFromRW 把 rwList（教务接口中已按课程代码聚合好的课程清单）
+// 转换为课程信息表数据：教师取自 RKJS（逗号分隔，本身就是多位教师的合并结果），
+// 教室从 PKSJDD 每段"…节]<教室>"文本提取并去重。
+// 说明：数据源已聚合好课程信息，因此不再用 Elements 做第二遍聚合。
+func courseInfosFromRW(rw []xskbRWRecord) []CourseInfo {
+	out := make([]CourseInfo, 0, len(rw))
+	for _, r := range rw {
+		if r.KCDM == "" {
+			continue
+		}
+		ci := CourseInfo{CourseID: r.KCDM, Name: r.KCMC}
+		// RKJS："张振华,程林,李家军,张余"（兼容中文逗号）
+		for _, t := range strings.Split(strings.ReplaceAll(r.RKJS, "，", ","), ",") {
+			t = strings.TrimSpace(t)
+			if t != "" && !containsStr(ci.Teachers, t) {
+				ci.Teachers = append(ci.Teachers, t)
+			}
+		}
+		// PKSJDD：段以 ";" 分隔（兼容中文分号），教室位于该段 "…节]教室"
+		for _, seg := range strings.Split(strings.ReplaceAll(r.PKSJDD, "；", ";"), ";") {
+			if i := strings.LastIndex(seg, "]"); i >= 0 {
+				loc := strings.TrimSpace(seg[i+1:])
+				if loc != "" && !containsStr(ci.Locations, loc) {
+					ci.Locations = append(ci.Locations, loc)
+				}
+			}
+		}
+		out = append(out, ci)
+	}
+	return out
+}
+
+func containsStr(list []string, v string) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 // ParseOptions 控制源数据解析。
@@ -113,6 +160,8 @@ func ParseXskb(data []byte, opts ParseOptions) (*Schedule, error) {
 		FirstMonday: opts.FirstMonday,
 		NumWeeks:    numWeeks,
 		Elements:    elements,
+		// 课程信息表直接使用源数据已聚合好的 rwList（不再二次聚合）
+		CourseList: courseInfosFromRW(env.RWList),
 	}
 	if err := s.Validate(); err != nil {
 		return nil, fmt.Errorf("解析出的课表不合法: %w", err)

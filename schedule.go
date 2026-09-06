@@ -124,6 +124,11 @@ type Schedule struct {
 	FirstMonday time.Time // 学期第 1 周周一的日期（样本 9月7号）
 	NumWeeks    int       // 学期周数（样本为 13）
 	Elements    []CourseElement
+	// CourseList 是"课程信息表"的数据。真实教务接口（rwList）已经按课程代码
+	// 把课程信息聚合好（含合并后的教师/教室等），解析时直接填入本字段；
+	// CourseInfos() 优先返回它，从而避免再从 Elements 做一遍重复聚合。
+	// 手工构造课表（本字段为空）时，CourseInfos() 退化为按 CourseID 聚合元素。
+	CourseList []CourseInfo
 }
 
 // NewWeekMask 把周序号列表（从 1 开始）折叠成位掩码。
@@ -202,36 +207,44 @@ func (s *Schedule) Validate() error {
 	return nil
 }
 
-// CourseInfos 按 CourseID 去重聚合全部真实课程，返回课程信息表的行数据。
-// 同一 CourseID 的多个元素如果教师/教室不同（不同老师分段授课、代课或换教室），
-// 会被分别合并进 Teachers / Locations（按元素首次出现顺序去重）。
-// 由于真实 CourseID 是任意字符串（非连续数字），这里用一个简单、稳定、
-// 快速的规则决定课程顺序：按 CourseID 的字符串字典序升序排列；
-// 渲染层再按该顺序显示 1、2、3… 展示序号，数据中记录的 CourseID 不受任何影响。
+// CourseInfos 返回"课程信息表"的行数据（渲染层再显示 1、2、3… 展示序号）。
+//
+// 若 Schedule.CourseList 已被填充（真实教务接口的 rwList 已按课程代码聚合好
+// 课程信息，含合并后的教师/教室等），则直接返回它——不再从 Elements 重复聚合。
+// 仅当 CourseList 为空（例如手工构造的课表）时，退化为按 CourseID 聚合元素：
+// 同一 CourseID 的多个元素如果教师/教室不同会被合并进 Teachers / Locations
+// （按元素首次出现顺序去重）。
+//
+// 无论哪条路径，最终都按 CourseID 字符串字典序升序排列（稳定且快速，
+// 适应真实环境里 CourseID 为任意字符串、非连续数字），数据中的 CourseID 不受影响。
 func (s *Schedule) CourseInfos() []CourseInfo {
-	idx := map[string]int{}
 	var out []CourseInfo
-	appendUnique := func(list []string, v string) []string {
-		for _, x := range list {
-			if x == v {
-				return list
+	if len(s.CourseList) > 0 {
+		out = append(out, s.CourseList...)
+	} else {
+		idx := map[string]int{}
+		appendUnique := func(list []string, v string) []string {
+			for _, x := range list {
+				if x == v {
+					return list
+				}
 			}
+			return append(list, v)
 		}
-		return append(list, v)
-	}
-	for i := range s.Elements {
-		e := &s.Elements[i]
-		pos, ok := idx[e.CourseID]
-		if !ok {
-			pos = len(out)
-			idx[e.CourseID] = pos
-			out = append(out, CourseInfo{CourseID: e.CourseID, Name: e.Name})
-		}
-		if e.Teacher != "" {
-			out[pos].Teachers = appendUnique(out[pos].Teachers, e.Teacher)
-		}
-		if e.Location != "" {
-			out[pos].Locations = appendUnique(out[pos].Locations, e.Location)
+		for i := range s.Elements {
+			e := &s.Elements[i]
+			pos, ok := idx[e.CourseID]
+			if !ok {
+				pos = len(out)
+				idx[e.CourseID] = pos
+				out = append(out, CourseInfo{CourseID: e.CourseID, Name: e.Name})
+			}
+			if e.Teacher != "" {
+				out[pos].Teachers = appendUnique(out[pos].Teachers, e.Teacher)
+			}
+			if e.Location != "" {
+				out[pos].Locations = appendUnique(out[pos].Locations, e.Location)
+			}
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CourseID < out[j].CourseID })

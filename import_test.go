@@ -95,8 +95,28 @@ func TestParseXskbMultiTeacher(t *testing.T) {
 	if info == nil {
 		t.Fatal("缺少 航天信息技术前沿 课程")
 	}
-	if len(info.Teachers) != 4 {
-		t.Errorf("航天课教师数 = %d, want 4（张振华/程林/李家军/张余）", len(info.Teachers))
+	// 课程信息直接来自 rwList 的 RKJS（数据源已聚合），顺序=源数据顺序
+	wantTeachers := []string{"张振华", "程林", "李家军", "张余"}
+	if len(info.Teachers) != len(wantTeachers) {
+		t.Errorf("航天课教师数 = %d, want 4", len(info.Teachers))
+	}
+	for i, w := range wantTeachers {
+		if info.Teachers[i] != w {
+			t.Fatalf("航天课教师 = %v, want %v", info.Teachers, wantTeachers)
+		}
+	}
+	// 教室从 rwList.PKSJDD 提取（去重）
+	if len(info.Locations) != 1 || info.Locations[0] != "SH2-104" {
+		t.Errorf("航天课教室 = %v, want [SH2-104]", info.Locations)
+	}
+	// Schedule.CourseList 已填充：课程信息表不再依赖元素二次聚合
+	if len(s.CourseList) != 6 {
+		t.Errorf("Schedule.CourseList 长度 = %d, want 6", len(s.CourseList))
+	}
+	for i, ci := range s.CourseInfos() {
+		if i > 0 && s.CourseInfos()[i-1].CourseID > ci.CourseID {
+			t.Error("CourseInfos 应按 CourseID 字典序排列")
+		}
 	}
 }
 
