@@ -1,5 +1,11 @@
 # BuaaScheduleRender
 
+<div align="center">
+
+<img src="https://raw.githubusercontent.com/lyy1119/Imgs/main/img/BSR.png" alt="logo" width="254">
+
+</div>
+
 北航研究生课表**自动获取与渲染**工具：统一身份认证登录 → 抓取教务系统课表数据 →
 解析为课表模型 → 渲染成 A4 版式的静态 HTML → 通过 Web 页面查看与打印。
 
