@@ -23,7 +23,7 @@ import (
 func main() {
 	addr := flag.String("addr", ":8080", "监听地址")
 	user := flag.String("user", os.Getenv("XSKB_USER"), "北航统一身份认证账号（自动登录模式；也可用环境变量 XSKB_USER）")
-	pass := flag.String("pass", os.Getenv("XSKB_PASS"), "账号密码（也可用环境变量 XSKB_PASS）")
+	pass := flag.String("pass", os.Getenv("XSKB_PASS"), "账号密码（含特殊字符时推荐优先用环境变量 XSKB_PASS 传递，避免 shell 转义问题）")
 	first := flag.String("first", "", "学期第 1 周周一的日期 YYYY-MM-DD（留空则按课表数据自动推算）")
 	landscape := flag.Bool("landscape", false, "输出 A4 横向（默认竖向）")
 	flag.Parse()
