@@ -198,7 +198,7 @@ func (s *Schedule) RenderHTML(w io.Writer, opts RenderOptions) error {
 	fmt.Fprintf(&b, "  html, body { margin: 0; padding: 0; }\n")
 	fmt.Fprintf(&b, "  body { background: #eeeeee; font-family: 'Microsoft YaHei', Arial, sans-serif; color: #000; font-size: %.3fmm; }\n", ly.fontMM)
 	// 标题占 2 个单元格高度，字号独立于正文
-	fmt.Fprintf(&b, "  h1 { height: %.3fmm; line-height: %.3fmm; font-size: %.3fmm; margin: 0; text-align: center; overflow: hidden; }\n",
+	fmt.Fprintf(&b, "  h1 { height: %.3fmm; line-height: %.3fmm; font-size: %.3fmm; margin: 0; text-align: left; overflow: hidden; }\n",
 		ly.titleHMM, ly.titleHMM, ly.titleFontMM)
 	b.WriteString("  h2.info-title { font-size: 1em; margin: 0 0 0.2mm; text-align: center; font-weight: bold; }\n")
 	b.WriteString("  table { border-collapse: collapse; }\n")
