@@ -22,7 +22,7 @@ import (
 
 func main() {
 	user := flag.String("user", os.Getenv("XSKB_USER"), "北航统一身份认证账号（或用环境变量 XSKB_USER）")
-	pass := flag.String("pass", os.Getenv("XSKB_PASS"), "账号密码（或用环境变量 XSKB_PASS）")
+	pass := flag.String("pass", os.Getenv("XSKB_PASS"), "账号密码（含特殊字符时推荐优先用环境变量 XSKB_PASS 传递，避免 shell 转义问题）")
 	sem := flag.String("sem", "", "5 位学期号，如 20261；为空按当前时间自动推断")
 	out := flag.String("out", "", "输出 JSON 文件路径；为空则打印到标准输出")
 	flag.Parse()
