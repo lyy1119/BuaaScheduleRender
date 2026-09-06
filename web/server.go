@@ -1,18 +1,18 @@
-// Package web 提供课表 Web 服务：同一端口提供三个页面，通过跳转衔接：
+// Package web 提供课表 Web 服务：同一端口、页面间用跳转衔接。
 //
-//	GET  /login      登录页（提供账号/密码手动登录）
-//	GET  /semester   学期选择页
-//	GET  /schedule   课表页（直接返回 render 渲染出的完整 HTML）
+//	GET  /login    登录页（提供账号/密码手动登录）
+//	GET  /schedule 课表页：上方工具栏（左侧学期输入+查询按钮，右侧打印按钮
+//	                跳转到纯课表页），下方以 iframe 内嵌课表
+//	GET  /schedule/print 纯课表页（A4 完整 HTML，用于直接打印）
+//	GET  /logout   退出
 //
-// 流程：/ → 无会话则跳 /login；登录成功跳 /semester；选定学期跳
-// /schedule?sem=20261。若配置了全局账号密码（命令行/环境变量），
-// 自动登录模式生效：跳过登录页，/ 与 /login 直接跳 /semester。
+// 未提供全局账号密码时，/ 与 /schedule 会跳 /login；提供（命令行/环境变量）
+// 时自动登录模式生效，跳过登录页。登录后直接进入 /schedule（学期默认按当前
+// 时间推断，工具栏可随时改学期查询）。
 //
-// 特点：
-//   - 课表页响应带强防缓存头（Cache-Control: no-store 等）；
-//   - 多用户：每用户独立 fetch.Client（独立 CookieJar），内存会话表
-//     RWMutex 保护，支持并发；空闲超时后惰性回收；
-//   - 页面均为无 JS 静态 HTML，风格从简。
+// 特点：课表页与纯课表页都带强防缓存头（Cache-Control: no-store 等）；
+// 多用户并发：每用户独立 fetch.Client（独立 Cookie 会话），会话表 RWMutex
+// 保护 + 空闲超时惰性回收；页面无 JS。
 package web
 
 import (
@@ -35,10 +35,9 @@ import (
 
 // Config 服务配置。
 type Config struct {
-	// Username/Password 非空时启用自动登录模式（跳过登录页），
-	// 所有请求共用该账号；为空则要求每个用户手动登录。
+	// Username/Password 非空时启用自动登录模式（跳过登录页）。
 	Username, Password string
-	// FirstMonday 学期第 1 周周一的日期（源数据不含该信息）。
+	// FirstMonday 学期第 1 周周一的日期；零值由解析时按源数据自动推算。
 	FirstMonday time.Time
 	// Portrait 输出方向（默认 A4 竖向）。
 	Portrait bool
@@ -55,7 +54,7 @@ type Server struct {
 	cfg     Config
 	clients *clientTable
 	mux     *http.ServeMux
-	logf    func(format string, args ...any)
+	logf    func(string, ...any)
 }
 
 type clientTable struct {
@@ -64,7 +63,7 @@ type clientTable struct {
 	idle time.Duration
 }
 
-// userClient 一个登录用户的抓取客户端（含其独立 CookieJar 会话）。
+// userClient 一个登录用户的抓取客户端（含独立 Cookie 会话）。
 type userClient struct {
 	cli      *fetch.Client
 	lastSeen time.Time
@@ -80,20 +79,16 @@ func New(cfg Config) *Server {
 	if cfg.SessionIdle <= 0 {
 		cfg.SessionIdle = 30 * time.Minute
 	}
-	s := &Server{
-		cfg:     cfg,
-		clients: newClientTable(cfg.SessionIdle),
-		logf:    func(string, ...any) {},
-	}
+	s := &Server{cfg: cfg, clients: newClientTable(cfg.SessionIdle), logf: func(string, ...any) {}}
 	if cfg.Logger != nil {
 		s.logf = cfg.Logger.Printf
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleRoot)
 	mux.HandleFunc("/login", s.handleLogin)
-	mux.HandleFunc("/semester", s.handleSemester)
-	mux.HandleFunc("/schedule", s.handleSchedule)
 	mux.HandleFunc("/logout", s.handleLogout)
+	mux.HandleFunc("/schedule", s.handleSchedule)
+	mux.HandleFunc("/schedule/print", s.handleSchedulePrint)
 	s.mux = mux
 	return s
 }
@@ -125,7 +120,6 @@ func (s *Server) removeClient(id string) {
 	delete(s.clients.m, id)
 }
 
-// cleanupIdle 惰性清理过期会话（由会话读取路径低频触发）。
 func (s *Server) cleanupIdle(now time.Time) {
 	s.clients.mu.Lock()
 	defer s.clients.mu.Unlock()
@@ -136,18 +130,23 @@ func (s *Server) cleanupIdle(now time.Time) {
 	}
 }
 
-// requireUser 根据当前请求确定用户抓取客户端：
-// 自动登录模式返回全局客户端；否则按 sid Cookie 查会话（不存在则重定向登录）。
+// autoClient 返回自动登录模式的全局客户端（懒创建）。
+func (s *Server) autoClient() *userClient {
+	s.clients.mu.Lock()
+	defer s.clients.mu.Unlock()
+	c, ok := s.clients.m["__auto__"]
+	if !ok {
+		c = &userClient{cli: fetch.NewClient(s.cfg.Username, s.cfg.Password), lastSeen: time.Now()}
+		s.clients.m["__auto__"] = c
+	}
+	return c
+}
+
+// requireUser 确定当前请求的用户客户端：
+// 自动登录模式返回全局客户端；否则按 sid Cookie 查会话（不存在则跳 /login）。
 func (s *Server) requireUser(w http.ResponseWriter, r *http.Request) (*userClient, bool) {
 	if s.cfg.Username != "" {
-		c, ok := s.clients.m["__auto__"]
-		if !ok {
-			c = &userClient{cli: fetch.NewClient(s.cfg.Username, s.cfg.Password), lastSeen: time.Now()}
-			s.clients.mu.Lock()
-			s.clients.m["__auto__"] = c
-			s.clients.mu.Unlock()
-		}
-		return c, true
+		return s.autoClient(), true
 	}
 	ck, err := r.Cookie(sessionCookie)
 	if err != nil || ck.Value == "" {
@@ -163,7 +162,6 @@ func (s *Server) requireUser(w http.ResponseWriter, r *http.Request) (*userClien
 	return c, true
 }
 
-// loggedIn 判断当前请求是否有会话（页面跳转判断用）。
 func (s *Server) loggedIn(r *http.Request) bool {
 	if s.cfg.Username != "" {
 		return true
@@ -184,20 +182,15 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.loggedIn(r) {
-		http.Redirect(w, r, "/semester", http.StatusFound)
+		http.Redirect(w, r, "/schedule", http.StatusFound)
 		return
 	}
 	http.Redirect(w, r, "/login", http.StatusFound)
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	// 自动登录模式：跳过登录页
-	if s.cfg.Username != "" {
-		http.Redirect(w, r, "/semester", http.StatusFound)
-		return
-	}
-	if s.loggedIn(r) {
-		http.Redirect(w, r, "/semester", http.StatusFound)
+	if s.cfg.Username != "" || s.loggedIn(r) {
+		http.Redirect(w, r, "/schedule", http.StatusFound)
 		return
 	}
 	noCache(w)
@@ -215,91 +208,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			writeLoginPage(w, "请输入账号与密码")
 			return
 		}
-		// 预置会话（登录校验延后到首次取课表，保证页面响应快）
 		id := newSID()
-		c := &userClient{cli: fetch.NewClient(user, pass), lastSeen: time.Now()}
-		s.addClient(id, c)
+		s.addClient(id, &userClient{cli: fetch.NewClient(user, pass), lastSeen: time.Now()})
 		http.SetCookie(w, &http.Cookie{
 			Name: sessionCookie, Value: id, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode,
 		})
-		http.Redirect(w, r, "/semester", http.StatusFound)
+		http.Redirect(w, r, "/schedule", http.StatusFound)
 	default:
 		w.Header().Set("Allow", "GET, POST")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (s *Server) handleSemester(w http.ResponseWriter, r *http.Request) {
-	uc, ok := s.requireUser(w, r)
-	if !ok {
-		return
-	}
-	_ = uc
-	noCache(w)
-	preset := fetch.AutoSemester(time.Now())
-	if v := r.URL.Query().Get("sem"); validSemester(v) {
-		preset = v
-	}
-	switch r.Method {
-	case http.MethodGet:
-		writeSemesterPage(w, preset, "")
-	case http.MethodPost:
-		if err := r.ParseForm(); err != nil {
-			writeSemesterPage(w, preset, "表单解析失败")
-			return
-		}
-		sem := strings.TrimSpace(r.FormValue("semester"))
-		if !validSemester(sem) {
-			writeSemesterPage(w, preset, "学期应为 5 位数字，如 20261")
-			return
-		}
-		http.Redirect(w, r, "/schedule?sem="+sem, http.StatusFound)
-	default:
-		w.Header().Set("Allow", "GET, POST")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-// handleSchedule 课表页：抓取该学期课表 JSON → 解析 → 渲染 HTML，
-// 并附加强防缓存响应头。
-func (s *Server) handleSchedule(w http.ResponseWriter, r *http.Request) {
-	uc, ok := s.requireUser(w, r)
-	if !ok {
-		return
-	}
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", "GET")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	sem := r.URL.Query().Get("sem")
-	if !validSemester(sem) {
-		http.Redirect(w, r, "/semester", http.StatusFound)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 150*time.Second)
-	defer cancel()
-
-	uc.mu.Lock()
-	data, err := uc.cli.FetchJSON(ctx, sem)
-	uc.mu.Unlock()
-	if err != nil {
-		s.logf("schedule fetch error (sem=%s): %v", sem, err)
-		writeSemesterPage(w, sem, "获取课表失败："+html.EscapeString(err.Error()))
-		return
-	}
-	sched, err := schedule.ParseXskb(data, schedule.ParseOptions{FirstMonday: s.cfg.FirstMonday})
-	if err != nil {
-		s.logf("schedule parse error (sem=%s): %v", sem, err)
-		writeSemesterPage(w, sem, "课表解析失败："+html.EscapeString(err.Error()))
-		return
-	}
-	opts := render.RenderOptions{Portrait: s.cfg.Portrait}
-	noCache(w)
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := render.RenderHTML(w, sched, opts); err != nil {
-		s.logf("render error: %v", err)
 	}
 }
 
@@ -311,7 +228,70 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login", http.StatusFound)
 }
 
+// handleSchedule 课表页：上方工具栏（学期输入+查询 | 打印按钮），
+// 下方 iframe 内嵌纯课表页。学期缺省按当前时间推断。
+func (s *Server) handleSchedule(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireUser(w, r); !ok {
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	noCache(w)
+	sem := semesterOrAuto(r.URL.Query().Get("sem"))
+	writeSchedulePage(w, sem)
+}
+
+// handleSchedulePrint 纯课表页（用于打印；同样防缓存）。
+func (s *Server) handleSchedulePrint(w http.ResponseWriter, r *http.Request) {
+	uc, ok := s.requireUser(w, r)
+	if !ok {
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sem := semesterOrAuto(r.URL.Query().Get("sem"))
+
+	ctx, cancel := context.WithTimeout(r.Context(), 150*time.Second)
+	defer cancel()
+
+	uc.mu.Lock()
+	data, err := uc.cli.FetchJSON(ctx, sem)
+	uc.mu.Unlock()
+	if err != nil {
+		s.logf("fetch error (sem=%s): %v", sem, err)
+		noCache(w)
+		writeErrorPage(w, "获取课表失败："+html.EscapeString(err.Error()))
+		return
+	}
+	sched, err := schedule.ParseXskb(data, schedule.ParseOptions{FirstMonday: s.cfg.FirstMonday})
+	if err != nil {
+		s.logf("parse error (sem=%s): %v", sem, err)
+		noCache(w)
+		writeErrorPage(w, "课表解析失败："+html.EscapeString(err.Error()))
+		return
+	}
+	noCache(w)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	opts := render.RenderOptions{Portrait: s.cfg.Portrait}
+	if err := render.RenderHTML(w, sched, opts); err != nil {
+		s.logf("render error: %v", err)
+	}
+}
+
 // ---- 工具 ----
+
+func semesterOrAuto(v string) string {
+	if validSemester(v) {
+		return v
+	}
+	return fetch.AutoSemester(time.Now())
+}
 
 func validSemester(s string) bool {
 	if len(s) != 5 {
@@ -339,7 +319,7 @@ const pageStyle = `<style>
   body { font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif; background:#eef1f5;
          display:flex; justify-content:center; align-items:center; min-height:90vh; margin:0; }
   .card { background:#fff; border:1px solid #d0d7de; border-radius:8px; padding:28px 34px;
-          width:320px; box-shadow:0 4px 14px rgba(0,0,0,.08); }
+          width:340px; box-shadow:0 4px 14px rgba(0,0,0,.08); }
   h1 { font-size:18px; text-align:center; margin:0 0 18px; }
   label { display:block; margin:10px 0 4px; font-size:13px; color:#444; }
   input[type=text], input[type=password] { box-sizing:border-box; width:100%; padding:8px;
@@ -349,7 +329,6 @@ const pageStyle = `<style>
   button:hover { background:#1a5ecb; }
   .err { color:#c0392b; font-size:12px; margin-top:10px; }
   .hint { color:#888; font-size:12px; margin-top:12px; text-align:center; }
-  a { color:#1f6feb; }
 </style>`
 
 func pageBase(title string) string {
@@ -372,18 +351,46 @@ func writeLoginPage(w http.ResponseWriter, errMsg string) {
 	fmt.Fprint(w, `</div></body></html>`)
 }
 
-func writeSemesterPage(w http.ResponseWriter, preset, errMsg string) {
+// writeSchedulePage 输出带工具栏的课表页：左侧学期输入+查询按钮，
+// 右侧打印按钮（跳转到纯课表页），下方 iframe 内嵌纯课表。
+func writeSchedulePage(w http.ResponseWriter, sem string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, pageBase("选择学期 - 课表"))
-	fmt.Fprint(w, `<div class="card"><h1>选择学期</h1>
-  <form method="post" action="/semester">
-    <label>学期编号（5 位，如 20261）</label>
-    <input type="text" name="semester" value="`+html.EscapeString(preset)+`">
-    <button type="submit">查看课表</button>
-  </form>`)
-	if errMsg != "" {
-		fmt.Fprintf(w, `<div class="err">%s</div>`, errMsg)
-	}
-	fmt.Fprint(w, `<div class="hint">提示：9-1月为 xxxx1，2-8月为 xxxx2（已自动填入默认值）。</div>`)
-	fmt.Fprint(w, `</div></body></html>`)
+	escSem := html.EscapeString(sem)
+	fmt.Fprint(w, `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8">
+<title>课表 `+escSem+`</title>
+<style>
+  body { font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif; margin:0; background:#eef1f5; }
+  .toolbar { display:flex; align-items:center; gap:16px; flex-wrap:wrap; background:#fff;
+             border-bottom:1px solid #d0d7de; padding:8px 14px; }
+  .brand { font-size:16px; font-weight:bold; }
+  .toolbar form { display:flex; align-items:center; gap:6px; margin:0; }
+  .toolbar input[type=text] { width:86px; padding:6px 8px; border:1px solid #c9d2dc; border-radius:4px; font-size:14px; }
+  .toolbar button { padding:7px 16px; border:0; border-radius:4px; background:#1f6feb; color:#fff;
+                    font-size:14px; cursor:pointer; }
+  .spacer { flex:1; }
+  .btn-print { text-decoration:none; padding:7px 16px; border:1px solid #1f6feb; border-radius:4px;
+               color:#1f6feb; font-size:14px; }
+  .btn-print:hover { background:#eaf2ff; }
+  iframe { display:block; width:100%; height:calc(100vh - 54px); border:0; }
+</style></head><body>
+<div class="toolbar">
+  <span class="brand">北航课表</span>
+  <form method="get" action="/schedule">
+    <label for="sem">学期</label>
+    <input type="text" id="sem" name="sem" value="`+escSem+`" maxlength="5" pattern="[0-9]{5}" title="5 位学期号，如 20261">
+    <button type="submit">查询</button>
+  </form>
+  <span class="spacer"></span>
+  <a class="btn-print" target="_blank" href="/schedule/print?sem=`+escSem+`">打印</a>
+</div>
+<iframe src="/schedule/print?sem=`+escSem+`" title="课表"></iframe>
+</body></html>`)
+}
+
+// writeErrorPage 纯课表页出错时的简单提示页（无 JS，可显示在 iframe 内）。
+func writeErrorPage(w http.ResponseWriter, msg string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprint(w, pageBase("错误 - 课表"))
+	fmt.Fprint(w, `<div class="card"><h1>课表加载失败</h1><div class="err">`+msg+`</div>
+<div class="hint"><a href="/schedule">返回重试</a></div></div></body></html>`)
 }

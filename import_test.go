@@ -1,6 +1,7 @@
 package schedule
 
 import (
+	"encoding/json"
 	"os"
 	"testing"
 	"time"
@@ -215,5 +216,46 @@ func TestFormatHMMRange(t *testing.T) {
 	}
 	if _, err := formatHMMRange(1290, 1300); err == nil {
 		t.Error("非法时刻(分≥60)应报错")
+	}
+}
+
+// TestInferFirstMonday 验证按 rwList 首次上课日期(SCSKRQ)推算第一周周一：
+// 样例首条 航天(D151052023)：SCSKRQ=2026-10-16(第6周周五)
+// → 所在周周一 10-12 往前推 5 周 → 2026-09-07。
+func TestInferFirstMonday(t *testing.T) {
+	data := loadXskbSample(t)
+	var env xskbEnvelope
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatal(err)
+	}
+	got := InferFirstMonday(env.RWList, time.Date(2026, 9, 6, 0, 0, 0, 0, time.Local))
+	want := time.Date(2026, 9, 7, 0, 0, 0, 0, time.Local)
+	if !got.Equal(want) {
+		t.Errorf("InferFirstMonday = %v, want %v", got, want)
+	}
+	// 空课程列表 → 当年 1 月 1 日
+	got2 := InferFirstMonday(nil, time.Date(2026, 6, 15, 0, 0, 0, 0, time.Local))
+	want2 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.Local)
+	if !got2.Equal(want2) {
+		t.Errorf("空列表 InferFirstMonday = %v, want %v", got2, want2)
+	}
+	// SCSKRQ 全缺失 → 也回退 1 月 1 日
+	bad := []XskbRWRecord{{KCDM: "A", PKSJDD: "1-2周 星期一[1-2节]J1"}}
+	got3 := InferFirstMonday(bad, time.Date(2026, 6, 15, 0, 0, 0, 0, time.Local))
+	if !got3.Equal(want2) {
+		t.Errorf("无有效 SCSKRQ 时 = %v, want %v", got3, want2)
+	}
+}
+
+// TestParseXskbAutoFirstMonday 验证不传 FirstMonday 时解析自动推算。
+func TestParseXskbAutoFirstMonday(t *testing.T) {
+	data := loadXskbSample(t)
+	s, err := ParseXskb(data, ParseOptions{}) // FirstMonday 零值
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(2026, 9, 7, 0, 0, 0, 0, time.Local)
+	if !s.FirstMonday.Equal(want) {
+		t.Errorf("自动推断 FirstMonday = %v, want %v", s.FirstMonday, want)
 	}
 }

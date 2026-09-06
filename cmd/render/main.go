@@ -32,12 +32,16 @@ func main() {
 	landscape := flag.Bool("landscape", false, "横向打印（A4 横向；默认竖向）")
 	dataFile := flag.String("data", "", "教务 JSON 文件路径（testdata/loadXskbData.json 等）")
 	dataURL := flag.String("url", "", "教务数据地址（http://10.124.37.11:8778/）")
-	first := flag.String("first", "2026-09-07", "学期第 1 周周一的日期 YYYY-MM-DD")
+	first := flag.String("first", "", "学期第 1 周周一的日期 YYYY-MM-DD（留空则按课表数据自动推算）")
 	flag.Parse()
 
-	firstMonday, err := time.ParseInLocation("2006-01-02", *first, time.Local)
-	if err != nil {
-		log.Fatalf("-first 日期格式错误（应为 YYYY-MM-DD）: %v", err)
+	var firstMonday time.Time
+	if *first != "" {
+		var err error
+		firstMonday, err = time.ParseInLocation("2006-01-02", *first, time.Local)
+		if err != nil {
+			log.Fatalf("-first 日期格式错误（应为 YYYY-MM-DD）: %v", err)
+		}
 	}
 
 	// ---- 准备 Schedule ----

@@ -24,13 +24,17 @@ func main() {
 	addr := flag.String("addr", ":8080", "监听地址")
 	user := flag.String("user", os.Getenv("XSKB_USER"), "北航统一身份认证账号（自动登录模式；也可用环境变量 XSKB_USER）")
 	pass := flag.String("pass", os.Getenv("XSKB_PASS"), "账号密码（也可用环境变量 XSKB_PASS）")
-	first := flag.String("first", "2026-09-07", "学期第 1 周周一的日期 YYYY-MM-DD")
+	first := flag.String("first", "", "学期第 1 周周一的日期 YYYY-MM-DD（留空则按课表数据自动推算）")
 	landscape := flag.Bool("landscape", false, "输出 A4 横向（默认竖向）")
 	flag.Parse()
 
-	firstMonday, err := time.ParseInLocation("2006-01-02", *first, time.Local)
-	if err != nil {
-		log.Fatalf("-first 日期格式错误: %v", err)
+	var firstMonday time.Time
+	if *first != "" {
+		var err error
+		firstMonday, err = time.ParseInLocation("2006-01-02", *first, time.Local)
+		if err != nil {
+			log.Fatalf("-first 日期格式错误: %v", err)
+		}
 	}
 	cfg := web.Config{
 		Username:    *user,
@@ -45,7 +49,7 @@ func main() {
 		log.Printf("手动登录模式（访问 / 开始）")
 	}
 	srv := web.New(cfg)
-	log.Printf("课表服务监听 %s（第 1 周周一 %s）", *addr, firstMonday.Format("2006-01-02"))
+	log.Printf("课表服务监听 %s（-first 未提供时将按课表数据自动推算第 1 周周一）", *addr)
 	if err := http.ListenAndServe(*addr, srv.Handler()); err != nil {
 		log.Fatalf("服务启动失败: %v", err)
 	}

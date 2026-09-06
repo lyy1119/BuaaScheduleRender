@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -54,7 +56,7 @@ type XskbCourseRecord struct {
 type xskbEnvelope struct {
 	Code     int                `json:"code"`
 	JGList   []XskbCourseRecord `json:"jgList"`
-	RWList   []xskbRWRecord     `json:"rwList"`
+	RWList   []XskbRWRecord     `json:"rwList"`
 	JCFAList []xskbJCFA         `json:"jcfaList"`
 }
 
@@ -70,13 +72,14 @@ type xskbJC struct {
 	JSSJ int    `json:"JSSJ"` // 结束时间，HHMM 编码，如 845
 }
 
-type xskbRWRecord struct {
+type XskbRWRecord struct {
 	XNXQMC string `json:"XNXQMC"` // 学年学期名，如 "2026-2027学年 第一学期"
 	KCDM   string `json:"KCDM"`
 	KCMC   string `json:"KCMC"`
 	BJMC   string `json:"BJMC"`
 	RKJS   string `json:"RKJS"`   // 任课教师（逗号分隔，已按课程聚合）
 	PKSJDD string `json:"PKSJDD"` // 排课地点时间描述（"周次 星期[节次]教室;…"）
+	SCSKRQ string `json:"SCSKRQ"` // 首次上课日期（YYYY-MM-DD），可用于推算学期第一周
 	XQMC   string `json:"XQMC"`   // 校区名
 	KKDWMC string `json:"KKDWMC"` // 开课单位
 }
@@ -85,7 +88,7 @@ type xskbRWRecord struct {
 // 转换为课程信息表数据：教师取自 RKJS（逗号分隔，本身就是多位教师的合并结果），
 // 教室从 PKSJDD 每段"…节]<教室>"文本提取并去重。
 // 说明：数据源已聚合好课程信息，因此不再用 Elements 做第二遍聚合。
-func courseInfosFromRW(rw []xskbRWRecord) []CourseInfo {
+func courseInfosFromRW(rw []XskbRWRecord) []CourseInfo {
 	out := make([]CourseInfo, 0, len(rw))
 	for _, r := range rw {
 		if r.KCDM == "" {
@@ -124,7 +127,9 @@ func containsStr(list []string, v string) bool {
 
 // ParseOptions 控制源数据解析。
 type ParseOptions struct {
-	// FirstMonday 学期第 1 周周一的日期（真实数据里不包含，必须提供）。
+	// FirstMonday 学期第 1 周周一的日期。零值（不设置）时自动推算：
+	// 取 rwList 中首个可推算课程（SCSKRQ 首次上课日期 → 所在周周一 − 其开课周−1 周），
+	// 课程列表为空或无有效日期时回退为当年 1 月 1 日（见 InferFirstMonday）。
 	FirstMonday time.Time
 	// NumWeeks 学期总周数；<=0 时自动取所有记录中的最大开课周。
 	NumWeeks int
@@ -132,6 +137,48 @@ type ParseOptions struct {
 	// 合并为连堂元素（如 11、12 节两条 → 1 个 11-12 元素，渲染时显示 *）。
 	// 默认 true。
 	MergeAdjacent *bool
+}
+
+// InferFirstMonday 推算学期第 1 周周一：
+//
+//	遍历 rwList，取第一条"能推算"的记录：SCSKRQ（首次上课日期，YYYY-MM-DD）
+//	所在周的周一，再往前推 (该课程开课周 firstWeek − 1) 周，
+//	即 firstMonday = weekMonday(SCSKRQ) − 7×(firstWeek−1)。
+//	firstWeek 从该课程 PKSJDD 描述的首个周段（如 "6-7周" → 6）取得。
+//
+//	rwList 为空、或没有任何记录带有效 SCSKRQ/周段时，返回 now 所在自然年的 1 月 1 日
+//	（课程为空时的约定兜底日期）。
+func InferFirstMonday(rw []XskbRWRecord, now time.Time) time.Time {
+	for _, r := range rw {
+		d, err := time.ParseInLocation("2006-01-02", r.SCSKRQ, now.Location())
+		if err != nil {
+			continue
+		}
+		firstWeek := parseFirstWeek(r.PKSJDD)
+		if firstWeek < 1 {
+			continue // 无有效开课周信息则跳过该条
+		}
+		// 所在周的周一
+		monday := d.AddDate(0, 0, -int(d.Weekday()-time.Monday))
+		return monday.AddDate(0, 0, -7*(firstWeek-1))
+	}
+	return time.Date(now.Year(), time.January, 1, 0, 0, 0, 0, now.Location())
+}
+
+// parseFirstWeek 从 PKSJDD（"6-7周 星期五[…];…"）中解析首个周段的起始周；
+// 解析失败返回 0。
+var reFirstWeek = regexp.MustCompile(`(\d+)`)
+
+func parseFirstWeek(pksjdd string) int {
+	m := reFirstWeek.FindStringSubmatch(pksjdd)
+	if m == nil {
+		return 0
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil || n < 1 {
+		return 0
+	}
+	return n
 }
 
 // ParseXskb 把教务接口返回的 JSON 字节解析为 *Schedule。
@@ -167,9 +214,14 @@ func ParseXskb(data []byte, opts ParseOptions) (*Schedule, error) {
 	if len(env.RWList) > 0 && env.RWList[0].XNXQMC != "" {
 		title = env.RWList[0].XNXQMC + "课表"
 	}
+	firstMonday := opts.FirstMonday
+	if firstMonday.IsZero() {
+		// 未显式指定：按 rwList 首次上课日期推算；无课程时回退当年 1 月 1 日
+		firstMonday = InferFirstMonday(env.RWList, time.Now())
+	}
 	s := &Schedule{
 		Title:       title,
-		FirstMonday: opts.FirstMonday,
+		FirstMonday: firstMonday,
 		NumWeeks:    numWeeks,
 		Elements:    elements,
 		// 课程信息表直接使用源数据已聚合好的 rwList（不再二次聚合）
