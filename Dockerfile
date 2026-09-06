@@ -2,10 +2,6 @@
 FROM golang:1.27 AS build
 WORKDIR /src
 
-# 先复制依赖清单（便于利用构建缓存）
-# 注意：COPY 不支持 shell 重定向；go.sum 不存在时需先创建或移除对应依赖
-COPY go.mod go.sum ./
-
 # 复制全部源码并编译 cmd/server
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server
