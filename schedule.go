@@ -45,7 +45,9 @@ var weekdayNames = [8]string{"", "一", "二", "三", "四", "五", "六", "日"
 // SlotsPerDay 每天固定节数。
 const SlotsPerDay = 14
 
-// SlotTimes 每节课的标准时间（与样本右侧"节次-时间表"一致）；下标 i 对应第 i+1 节。
+// SlotTimes 是默认的每节标准时间（与样本右侧"节次-时间表"一致）；
+// 下标 i 对应第 i+1 节。真实教务数据若提供 jcfaList 节次时间表
+// （解析后仍为 "hh:mm-hh:mm"），会存到 Schedule.SlotTimes 覆盖本默认值。
 var SlotTimes = [SlotsPerDay]string{
 	"08:00-08:45", // 第 1 节
 	"08:50-09:35", // 第 2 节
@@ -129,6 +131,25 @@ type Schedule struct {
 	// CourseInfos() 优先返回它，从而避免再从 Elements 做一遍重复聚合。
 	// 手工构造课表（本字段为空）时，CourseInfos() 退化为按 CourseID 聚合元素。
 	CourseList []CourseInfo
+	// SlotTimes 是本课表的节次时间表（"hh:mm-hh:mm"，下标 i 对应第 i+1 节）。
+	// 源数据提供 jcfaList 时解析填充并覆盖默认时间表；为空则使用包级默认
+	// SlotTimes。节次始终为阿拉伯数字 1..14。
+	SlotTimes []string
+}
+
+// SlotTimeText 返回第 slot 节的时间文本（"hh:mm-hh:mm"）。
+// 优先使用本课表 SlotTimes（源数据 jcfaList 覆盖后的时间表），否则使用默认值。
+func (s *Schedule) SlotTimeText(slot int) string {
+	if len(s.SlotTimes) > 0 {
+		if slot >= 1 && slot <= len(s.SlotTimes) {
+			return s.SlotTimes[slot-1]
+		}
+		return ""
+	}
+	if slot >= 1 && slot <= len(SlotTimes) {
+		return SlotTimes[slot-1]
+	}
+	return ""
 }
 
 // NewWeekMask 把周序号列表（从 1 开始）折叠成位掩码。

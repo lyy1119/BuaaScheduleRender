@@ -55,7 +55,19 @@ type xskbEnvelope struct {
 	Code     int                `json:"code"`
 	JGList   []XskbCourseRecord `json:"jgList"`
 	RWList   []xskbRWRecord     `json:"rwList"`
-	JCFAList json.RawMessage    `json:"jcfaList"`
+	JCFAList []xskbJCFA         `json:"jcfaList"`
+}
+
+// xskbJCFA 对应 jcfaList 中的一个节次方案；skjcList 为该方案下每一节的
+// 序号与起止时间（KSSJ/JSSJ 为 HHMM 整数，如 800 = 08:00）。
+type xskbJCFA struct {
+	SkjcList []xskbJC `json:"skjcList"`
+}
+
+type xskbJC struct {
+	DM   string `json:"DM"`   // 节次序号："1".."14"
+	KSSJ int    `json:"KSSJ"` // 开始时间，HHMM 编码，如 800
+	JSSJ int    `json:"JSSJ"` // 结束时间，HHMM 编码，如 845
 }
 
 type xskbRWRecord struct {
@@ -163,10 +175,47 @@ func ParseXskb(data []byte, opts ParseOptions) (*Schedule, error) {
 		// 课程信息表直接使用源数据已聚合好的 rwList（不再二次聚合）
 		CourseList: courseInfosFromRW(env.RWList),
 	}
+	// 节次时间表：数据若提供 jcfaList.skjcList，则解析并覆盖默认时间表
+	if times, ok := slotTimesFromJCFA(env.JCFAList); ok {
+		s.SlotTimes = times
+	}
 	if err := s.Validate(); err != nil {
 		return nil, fmt.Errorf("解析出的课表不合法: %w", err)
 	}
 	return s, nil
+}
+
+// slotTimesFromJCFA 解析 jcfaList 节次方案，返回与节次 1..14 对齐的时间表
+// （第 i 项对应第 i+1 节，形如 "08:00-08:45"；缺失的节次为空串）。
+// 未提供时间表时返回 ok=false，调用方沿用默认时间表。
+func slotTimesFromJCFA(jcfa []xskbJCFA) ([]string, bool) {
+	table := make([]string, SlotsPerDay)
+	found := false
+	for _, fa := range jcfa {
+		for _, jc := range fa.SkjcList {
+			dm := 0
+			if _, err := fmt.Sscanf(jc.DM, "%d", &dm); err != nil || dm < 1 || dm > SlotsPerDay {
+				continue
+			}
+			text, err := formatHMMRange(jc.KSSJ, jc.JSSJ)
+			if err != nil {
+				continue
+			}
+			table[dm-1] = text
+			found = true
+		}
+	}
+	return table, found
+}
+
+// formatHMMRange 把 HHMM 编码的起止时刻格式化为 "hh:mm-hh:mm"。
+func formatHMMRange(ks, js int) (string, error) {
+	kh, km := ks/100, ks%100
+	jh, jm := js/100, js%100
+	if kh < 0 || kh > 23 || km < 0 || km > 59 || jh < 0 || jh > 23 || jm < 0 || jm > 59 {
+		return "", fmt.Errorf("非法时间 %d-%d", ks, js)
+	}
+	return fmt.Sprintf("%02d:%02d-%02d:%02d", kh, km, jh, jm), nil
 }
 
 // buildElements 把课程安排记录映射为 CourseElement。

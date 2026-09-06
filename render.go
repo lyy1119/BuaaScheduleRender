@@ -262,8 +262,8 @@ func (s *Schedule) RenderHTML(w io.Writer, opts RenderOptions) error {
 				}
 			}
 			switch {
-			case day == Monday: // 周一区段：右侧显示节次-时间表
-				fmt.Fprintf(&b, "<td class=\"ps\">%d</td><td class=\"ps time\">%s</td>", slot, SlotTimes[slot-1])
+			case day == Monday: // 周一区段：右侧显示节次-时间表（源数据 jcfaList 覆盖时以其为准）
+				fmt.Fprintf(&b, "<td class=\"ps\">%d</td><td class=\"ps time\">%s</td>", slot, s.SlotTimeText(slot))
 			case day == Tuesday && slot == 1:
 				// 周二~周日右侧 P/Q 合并大格：课程信息表（按 CourseID 去重排序）
 				fmt.Fprintf(&b, "<td class=\"info-cell\" colspan=\"2\" rowspan=\"%d\">", 6*SlotsPerDay)

@@ -160,3 +160,60 @@ func TestParseZCBH(t *testing.T) {
 		t.Error("全 0 位串应报错")
 	}
 }
+
+// TestParseJCFASlotTimes 验证样例数据中的 jcfaList 时间表被解析并覆盖默认时间表。
+func TestParseJCFASlotTimes(t *testing.T) {
+	data := loadXskbSample(t)
+	s, err := ParseXskb(data, ParseOptions{FirstMonday: time.Date(2026, 9, 7, 0, 0, 0, 0, time.Local)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.SlotTimes) != 14 {
+		t.Fatalf("解析出的时间表长度 = %d, want 14", len(s.SlotTimes))
+	}
+	for slot, want := range map[int]string{
+		1:  "08:00-08:45",
+		10: "17:30-18:15",
+		11: "19:00-19:45",
+		14: "21:30-22:15",
+	} {
+		if got := s.SlotTimeText(slot); got != want {
+			t.Errorf("第 %d 节时间 = %q, want %q", slot, got, want)
+		}
+	}
+}
+
+// TestSlotTimeOverride 验证 SlotTimeText 的取值优先级：
+// 课表自带时间表覆盖默认；未设置时回退默认。
+func TestSlotTimeOverride(t *testing.T) {
+	base := &Schedule{FirstMonday: time.Date(2026, 9, 7, 0, 0, 0, 0, time.Local), NumWeeks: 13}
+	if got := base.SlotTimeText(1); got != "08:00-08:45" {
+		t.Errorf("未覆盖时应使用默认第 1 节 %q, got %q", "08:00-08:45", got)
+	}
+	custom := &Schedule{
+		FirstMonday: time.Date(2026, 9, 7, 0, 0, 0, 0, time.Local),
+		NumWeeks:    13,
+		SlotTimes:   []string{"08:30-09:10", "09:20-10:00"},
+	}
+	if got := custom.SlotTimeText(1); got != "08:30-09:10" {
+		t.Errorf("覆盖后第 1 节时间 = %q, want 08:30-09:10", got)
+	}
+	if got := custom.SlotTimeText(3); got != "" {
+		t.Errorf("超出时间表长度的节次应返回空串, got %q", got)
+	}
+}
+
+// TestFormatHMMRange 验证 HHMM 时刻格式化为 "hh:mm-hh:mm"。
+func TestFormatHMMRange(t *testing.T) {
+	got, err := formatHMMRange(800, 845)
+	if err != nil || got != "08:00-08:45" {
+		t.Errorf("formatHMMRange(800,845) = %q, %v", got, err)
+	}
+	got, err = formatHMMRange(1900, 1945)
+	if err != nil || got != "19:00-19:45" {
+		t.Errorf("formatHMMRange(1900,1945) = %q, %v", got, err)
+	}
+	if _, err := formatHMMRange(1290, 1300); err == nil {
+		t.Error("非法时刻(分≥60)应报错")
+	}
+}
