@@ -256,9 +256,9 @@ func TestCalcLayout(t *testing.T) {
 	if sum < 99.5 || sum > 100.5 {
 		t.Errorf("colPct 合计 = %.2f%%，应约为 100%%", sum)
 	}
-	// 标题占 2 格高
-	if got := ly.titleHMM; got != 2*ly.cellHMM {
-		t.Errorf("titleHMM = %.4f, want 2×cellH = %.4f", got, 2*ly.cellHMM)
+	// 标题占 titleCellRows 格高（按用户 CSS 调整为 1.5）
+	if got := ly.titleHMM; got != titleCellRows*ly.cellHMM {
+		t.Errorf("titleHMM = %.4f, want titleCellRows×cellH = %.4f", got, titleCellRows*ly.cellHMM)
 	}
 	// 竖版翻转纸张
 	lyp := s.calcLayout(true)
