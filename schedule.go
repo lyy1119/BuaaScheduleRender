@@ -65,34 +65,9 @@ var SlotTimes = [SlotsPerDay]string{
 	"21:30-22:15", // 第 14 节
 }
 
-// 课表格字符预算的推导顺序（先定日期列宽，再限课程名长度）：
-//
-//	① 表头每周一日期最长为"月日双位数"，即 "12月31日"（6 个字符、视觉最宽）；
-//	② 各周次列的宽度按该最长日期设置，保证日期行永远单行、各列等宽；
-//	③ 同一列里的课程格内容宽度不能超过日期列宽，因此课程名只能显示一部分：
-//	   CellNameBudget = 最长日期的视觉余量（日期含 2 个全角汉字，课程名前缀为
-//	   半角节次号+空格，两者视觉宽度接近），课程名最多显示 CellNameBudget 个字符，
-//	   其余被严格截断——格子里有节次序号可定位，完整课程名在右侧"课程信息表"中。
-const (
-	// DateMaxText 是可能出现的日期最长文本（月、日均为两位数），用于锚定列宽。
-	DateMaxText = "12月31日"
-	// CellNameBudget 课表格中课程名最多显示的字符（rune）数。
-	CellNameBudget = 4
-)
-
-// FitName 将课程名严格截断为至多 budget 个字符（按 rune，中文/英文一视同仁）。
-// 它不做任何"另起别名"式的加工，只是直接截短；超出部分被丢弃，
-// 完整名称仍保存在数据中（课程信息表展示完整名称）。
-func FitName(name string, budget int) string {
-	r := []rune(name)
-	if budget <= 0 {
-		return ""
-	}
-	if len(r) <= budget {
-		return name
-	}
-	return string(r[:budget])
-}
+// 课程格内文字预算与课名截断逻辑属于"渲染"范畴，位于 render 子包
+// （render.CellNameBudget / render.FitName / render.DateMaxText），
+// 请参见 render/render.go；本包只保存课表数据模型。
 
 // CourseElement 是一段"上课时间元素"：同一门真实课程在若干个周的某个星期几、
 // 从 StartSlot 到 EndSlot 的连续若干节次上课（1-2 节连堂 = StartSlot 1、EndSlot 2）。

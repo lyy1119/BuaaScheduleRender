@@ -24,6 +24,7 @@ import (
 	"time"
 
 	schedule "github.com/lyy1119/BuaaScheduleRender"
+	render "github.com/lyy1119/BuaaScheduleRender/render"
 )
 
 func main() {
@@ -76,8 +77,8 @@ func main() {
 	defer f.Close()
 
 	// 默认竖向打印；-landscape 时切换为横向
-	opts := schedule.RenderOptions{Portrait: !*landscape}
-	if err := s.RenderHTML(f, opts); err != nil {
+	opts := render.RenderOptions{Portrait: !*landscape}
+	if err := render.RenderHTML(f, s, opts); err != nil {
 		log.Fatalf("渲染失败: %v", err)
 	}
 	orient := "纵向"

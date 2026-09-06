@@ -1,11 +1,45 @@
-package schedule
+// Package render 负责"课表 → HTML"的版面计算与渲染输出。
+//
+// 因为 Schedule 等类型定义在根包（package schedule），而 Go 不允许跨包为类型
+// 新增方法，这里以包级函数形式对外提供：
+//
+//	RenderHTML(w, s, opts) 渲染完整 HTML
+//	CellText(s, week, weekday, slot) 某格显示文本
+//	FitName(name, budget) 课名按列宽预算严格截断
+//
+// 版式常量（日期锚定列宽、名称预算等）也集中在本包。
+package render
 
 import (
 	"fmt"
 	"html/template"
 	"io"
 	"strings"
+
+	schedule "github.com/lyy1119/BuaaScheduleRender"
 )
+
+// weekdayShort 星期 1..7 的中文简称（渲染标签用）。
+var weekdayShort = [8]string{"", "一", "二", "三", "四", "五", "六", "日"}
+
+// DateMaxText 是日期表头可能出现的最长文本（月、日双位数），用于锚定列宽。
+const DateMaxText = "12月31日"
+
+// CellNameBudget 课表格中课程名最多显示的字符（rune）数（详见包文档）。
+const CellNameBudget = 4
+
+// FitName 将课程名严格截断为至多 budget 个字符（按 rune，中文/英文一视同仁）。
+// 不做任何"另起别名"式加工，只直接截短；完整名称保存在数据中（信息表展示）。
+func FitName(name string, budget int) string {
+	r := []rune(name)
+	if budget <= 0 {
+		return ""
+	}
+	if len(r) <= budget {
+		return name
+	}
+	return string(r[:budget])
+}
 
 // 版式与框线规则：
 //   - 页面固定为 A4 纸大小（默认横向 297×210mm；Portrait=true 翻转 210×297mm），
@@ -20,7 +54,7 @@ const (
 	cssStrong = "2px solid #000"
 
 	// 单元格行模型：表格 14 节 × 7 天 + 2 个表头行 = 100 行；标题另占 2 行。
-	tableCellRows = SlotsPerDay*7 + 2
+	tableCellRows = schedule.SlotsPerDay*7 + 2
 	titleCellRows = 1.5
 	// 单元格宽度模型：星期列/节次列各 0.5 格，周次列每列 1 格，
 	// 右侧节次-时间表的节次列 0.5 格、时间列最少 2 格（其余空白自动补全）。
@@ -90,7 +124,7 @@ const (
 //	     表格（除右侧外）收窄，剩余宽度被右侧"时间/课程信息"列自动补全；
 //	   · 若宽度更紧张（fs=fs_w）：列宽维持 W0，右侧取最小宽度 2×cellW。
 //	输出同时给出 mm 值与换算好的百分比（列宽占可用宽、行高 line-height 相对字号）。
-func (s *Schedule) calcLayout(portrait bool) layout {
+func calcLayout(s *schedule.Schedule, portrait bool) layout {
 	ly := layout{portrait: portrait}
 	if portrait {
 		ly.pageWMM, ly.pageHMM = 210, 297
@@ -150,7 +184,7 @@ func (s *Schedule) calcLayout(portrait bool) layout {
 // courseSeqByID 返回 CourseID → 展示序号（从 1 起）。
 // 序号与右侧"课程信息表"的条目编号同源（均按 CourseID 字典序），
 // 保证课表格中的课程号与右侧信息表一一对应。
-func (s *Schedule) courseSeqByID() map[string]int {
+func courseSeqByID(s *schedule.Schedule) map[string]int {
 	m := map[string]int{}
 	for i, ci := range s.CourseInfos() {
 		m[ci.CourseID] = i + 1
@@ -165,8 +199,8 @@ func (s *Schedule) courseSeqByID() map[string]int {
 //	           （序号 = 该课程在右侧课程信息表中的编号，同一课程在课表中同号；
 //	             实际节次由行位置确定，不再重复标注节次数字）
 //	连堂后续节次格 → continuationMark（"#"：表示与上一格同一门课连堂）
-func (s *Schedule) cellInfo(week, weekday, slot int) (string, *CourseElement) {
-	seq := s.courseSeqByID()
+func cellInfo(s *schedule.Schedule, week, weekday, slot int) (string, *schedule.CourseElement) {
+	seq := courseSeqByID(s)
 	for i := range s.Elements {
 		e := &s.Elements[i]
 		if e.Weekday != weekday || !e.HasWeek(week) || slot < e.StartSlot || slot > e.EndSlot {
@@ -181,22 +215,22 @@ func (s *Schedule) cellInfo(week, weekday, slot int) (string, *CourseElement) {
 	return "", nil
 }
 
-// CellText 是 cellInfo 的公开文本版。
-func (s *Schedule) CellText(week, weekday, slot int) string {
-	t, _ := s.cellInfo(week, weekday, slot)
+// CellText 返回 (周、星期、节次) 格子的显示文本（无课返回空串）。
+func CellText(s *schedule.Schedule, week, weekday, slot int) string {
+	t, _ := cellInfo(s, week, weekday, slot)
 	return t
 }
 
-// RenderHTML 把课表渲染成一个完整、自包含（内嵌 CSS）、零脚本的静态 HTML 文档。
-// 页面固定为 A4 纸张大小；所有行高、列宽、字号均由 calcLayout 一次计算，
-// 列宽与行高以百分比、字号以 mm 输出；表格下方不输出任何提示文字。
-func (s *Schedule) RenderHTML(w io.Writer, opts RenderOptions) error {
+// RenderHTML 把课表 s 渲染成一个完整、自包含（内嵌 CSS）、零脚本的静态 HTML 文档，
+// 写入 w。页面固定为 A4 纸张大小；行高、列宽、字号由 calcLayout 一次计算，
+// 列宽与行高以百分比、字号以 mm 输出。
+func RenderHTML(w io.Writer, s *schedule.Schedule, opts RenderOptions) error {
 	if err := s.Validate(); err != nil {
 		return fmt.Errorf("渲染被拒绝：课表数据不合法: %w", err)
 	}
 	esc := func(v string) string { return template.HTMLEscapeString(v) }
 
-	ly := s.calcLayout(opts.Portrait)
+	ly := calcLayout(s, opts.Portrait)
 
 	var b strings.Builder
 	b.WriteString("<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"UTF-8\">\n")
@@ -266,15 +300,15 @@ func (s *Schedule) RenderHTML(w io.Writer, opts RenderOptions) error {
 	b.WriteString("<th class=\"ps\">节次</th><th class=\"ps time\">时间</th>")
 	b.WriteString("</tr>\n</thead>\n<tbody>\n")
 
-	for day := Monday; day <= Sunday; day++ {
-		for slot := 1; slot <= SlotsPerDay; slot++ {
+	for day := schedule.Monday; day <= schedule.Sunday; day++ {
+		for slot := 1; slot <= schedule.SlotsPerDay; slot++ {
 			b.WriteString("<tr>")
 			if slot == 1 {
-				fmt.Fprintf(&b, "<td class=\"weekday\" rowspan=\"%d\">%s</td>", SlotsPerDay, weekdayNames[day])
+				fmt.Fprintf(&b, "<td class=\"weekday\" rowspan=\"%d\">%s</td>", schedule.SlotsPerDay, weekdayShort[day])
 			}
 			fmt.Fprintf(&b, "<td>%d</td>", slot)
 			for w := 1; w <= s.NumWeeks; w++ {
-				text, el := s.cellInfo(w, day, slot)
+				text, el := cellInfo(s, w, day, slot)
 				switch {
 				case text == "":
 					b.WriteString("<td class=\"course\"></td>")
@@ -292,11 +326,11 @@ func (s *Schedule) RenderHTML(w io.Writer, opts RenderOptions) error {
 				}
 			}
 			switch {
-			case day == Monday: // 周一区段：右侧显示节次-时间表（源数据 jcfaList 覆盖时以其为准）
+			case day == schedule.Monday: // 周一区段：右侧显示节次-时间表（源数据 jcfaList 覆盖时以其为准）
 				fmt.Fprintf(&b, "<td class=\"ps\">%d</td><td class=\"ps time\">%s</td>", slot, s.SlotTimeText(slot))
-			case day == Tuesday && slot == 1:
+			case day == schedule.Tuesday && slot == 1:
 				// 周二~周日右侧 P/Q 合并大格：课程信息表（按 CourseID 去重排序）
-				fmt.Fprintf(&b, "<td class=\"info-cell\" colspan=\"2\" rowspan=\"%d\">", 6*SlotsPerDay)
+				fmt.Fprintf(&b, "<td class=\"info-cell\" colspan=\"2\" rowspan=\"%d\">", 6*schedule.SlotsPerDay)
 				b.WriteString("<div class=\"info-wrap\">")
 				b.WriteString("<h2 class=\"info-title\">课程信息</h2>")
 				infos := s.CourseInfos()

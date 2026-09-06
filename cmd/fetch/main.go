@@ -17,7 +17,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/lyy1119/BuaaScheduleRender/gsmis"
+	"github.com/lyy1119/BuaaScheduleRender/fetch"
 )
 
 func main() {
@@ -31,11 +31,11 @@ func main() {
 		log.Fatal("缺少账号/密码：请用 -user/-pass 或环境变量 XSKB_USER/XSKB_PASS 提供")
 	}
 	if *sem == "" {
-		*sem = gsmis.AutoSemester(time.Now())
+		*sem = fetch.AutoSemester(time.Now())
 		fmt.Fprintf(os.Stderr, "自动推断学期: %s\n", *sem)
 	}
 
-	c := gsmis.NewClient(*user, *pass)
+	c := fetch.NewClient(*user, *pass)
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
