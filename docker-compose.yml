@@ -1,0 +1,25 @@
+# 课表 Web 服务
+# 使用前请修改 environment 中的 <user> / <pass>：
+#   XSKB_USER: 北航统一身份认证账号
+#   XSKB_PASS: 对应密码（含特殊字符也无需转义）
+# 提供二者后服务进入"自动登录模式"，跳过登录页。
+#
+# 端口映射：把 <ip:port> 改成实际监听地址，例如
+#   - "8080:8080"          绑定全部网卡的 8080
+#   - "127.0.0.1:8080:8080"仅本机访问
+services:
+  schedule:
+    build: .
+    image: buaa-schedule-server:latest
+    restart: unless-stopped
+    environment:
+      # 账号与密码（请修改为自己的值）
+      XSKB_USER: <user>
+      XSKB_PASS: <pass>
+      # 时区（与 Dockerfile 一致，可保持不变）
+      TZ: Asia/Shanghai
+    ports:
+      # 宿主机端口映射：<ip:port>:8080
+      - "<ip:port>:8080"
+    # 如需额外参数（调试日志 / 横向 / 指定开学日等）取消注释：
+    # command: ["-addr", ":8080", "-debug"]
