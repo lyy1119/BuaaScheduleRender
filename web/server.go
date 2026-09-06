@@ -55,6 +55,10 @@ type Config struct {
 
 const sessionCookie = "xskb_sid"
 
+// fetchCacheTTL 会话内课表缓存的过期时间：同一用户同一学期在此时间内直接复用，
+// 超过则重新向教务抓取；另可用 ?refresh=1 强制刷新（见 handleSchedule*）。
+const fetchCacheTTL = 3 * time.Minute
+
 // Server 是课表 Web 服务。
 type Server struct {
 	cfg     Config
@@ -76,10 +80,12 @@ type userClient struct {
 	lastSeen time.Time
 	mu       sync.Mutex // 串行化该用户的抓取（自动登录/取数竞争安全）
 
-	// cacheSem/cacheJSON：最近一次成功获取的课表 JSON 缓存（避免登录验证后
-	// 课表页重复请求同一学期）。
+	// cacheSem/cacheJSON/cacheAt：最近一次成功获取的课表 JSON 缓存
+	//（避免登录验证后课表页重复请求同一学期）。缓存在内存中，
+	// 有 fetchCacheTTL 有效期，会话被空闲回收即失效。
 	cacheSem  string
 	cacheJSON []byte
+	cacheAt   time.Time
 }
 
 func newClientTable(idle time.Duration) *clientTable {
@@ -276,7 +282,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		id := newSID()
-		uc := &userClient{cli: cli, lastSeen: time.Now(), cacheSem: sem, cacheJSON: data}
+		uc := &userClient{cli: cli, lastSeen: time.Now(), cacheSem: sem, cacheJSON: data, cacheAt: time.Now()}
 		s.addClient(id, uc)
 		s.logf("登录成功：账号 %s（session %s…）", user, id[:8])
 		http.SetCookie(w, &http.Cookie{
@@ -311,8 +317,9 @@ func (s *Server) handleSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	noCache(w)
 	sem := semesterOrAuto(r.URL.Query().Get("sem"))
+	refresh := r.URL.Query().Get("refresh") == "1"
 	manual := s.cfg.Username == "" // 手动登录模式才显示"退出登录"
-	writeSchedulePage(w, sem, manual)
+	writeSchedulePage(w, sem, manual, refresh)
 }
 
 // handleSchedulePrint 纯课表页（用于打印；同样防缓存）。
@@ -327,24 +334,30 @@ func (s *Server) handleSchedulePrint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sem := semesterOrAuto(r.URL.Query().Get("sem"))
+	force := r.URL.Query().Get("refresh") == "1" // 强制绕过缓存重新抓取
 
 	ctx, cancel := context.WithTimeout(r.Context(), 150*time.Second)
 	defer cancel()
 
 	var data []byte
 	var err error
+	now := time.Now()
 	uc.mu.Lock()
-	if uc.cacheSem == sem {
+	switch {
+	case !force && uc.cacheSem == sem && now.Sub(uc.cacheAt) < fetchCacheTTL:
 		data = uc.cacheJSON
-		s.debugf("fetch 命中缓存：sem=%s", sem)
-	} else {
-		s.debugf("fetch 开始：sem=%s", sem)
+		s.debugf("fetch 命中缓存：sem=%s（缓存 %s 前）", sem, now.Sub(uc.cacheAt).Round(time.Second))
+	case uc.cacheSem == sem && !force:
+		s.debugf("fetch 缓存过期：sem=%s（%s 前，将重新抓取）", sem, now.Sub(uc.cacheAt).Round(time.Second))
 		data, err = uc.cli.FetchJSON(ctx, sem)
-		if err == nil {
-			uc.cacheSem, uc.cacheJSON = sem, data
-		} else {
-			s.debugf("fetch 失败：sem=%s（%s）", sem, err)
-		}
+	default:
+		s.debugf("fetch 开始：sem=%s%s", sem, map[bool]string{true: "（强制刷新）", false: ""}[force])
+		data, err = uc.cli.FetchJSON(ctx, sem)
+	}
+	if err == nil {
+		uc.cacheSem, uc.cacheJSON, uc.cacheAt = sem, data, now
+	} else {
+		s.debugf("fetch 失败：sem=%s（%s）", sem, err)
 	}
 	uc.mu.Unlock()
 	if err != nil {
@@ -438,9 +451,13 @@ func writeLoginPage(w http.ResponseWriter, errMsg string) {
 
 // writeSchedulePage 输出带工具栏的课表页：左侧学期输入+查询按钮，
 // 右侧打印按钮（跳转到纯课表页），下方 iframe 内嵌纯课表。
-func writeSchedulePage(w http.ResponseWriter, sem string, manual bool) {
+func writeSchedulePage(w http.ResponseWriter, sem string, manual, refresh bool) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	escSem := html.EscapeString(sem)
+	printURL := "/schedule/print?sem=" + escSem
+	if refresh {
+		printURL += "&refresh=1"
+	}
 	logout := ""
 	if manual {
 		logout = `  <a class="btn-logout" href="/logout">退出登录</a>`
@@ -463,6 +480,9 @@ func writeSchedulePage(w http.ResponseWriter, sem string, manual bool) {
   .btn-logout { text-decoration:none; padding:7px 16px; border:1px solid #d33; border-radius:4px;
                 color:#d33; font-size:14px; margin-left:6px; }
   .btn-logout:hover { background:#fdecec; }
+  .btn-refresh { text-decoration:none; padding:7px 12px; border:1px solid #888; border-radius:4px;
+                 color:#555; font-size:13px; }
+  .btn-refresh:hover { background:#f2f2f2; }
   iframe { display:block; width:100%; height:calc(100vh - 54px); border:0; }
 </style></head><body>
 <div class="toolbar">
@@ -471,11 +491,12 @@ func writeSchedulePage(w http.ResponseWriter, sem string, manual bool) {
     <label for="sem">学期</label>
     <input type="text" id="sem" name="sem" value="`+escSem+`" maxlength="5" pattern="[0-9]{5}" title="5 位学期号，如 20261">
     <button type="submit">查询</button>
+    <a class="btn-refresh" href="/schedule?sem=`+escSem+`&refresh=1" title="绕过缓存，重新向教务抓取">强制刷新</a>
   </form>
   <span class="spacer"></span>
-  <a class="btn-print" target="_blank" href="/schedule/print?sem=`+escSem+`">打印</a>`+logout+`
+  <a class="btn-print" target="_blank" href="`+printURL+`">打印</a>`+logout+`
 </div>
-<iframe src="/schedule/print?sem=`+escSem+`" title="课表"></iframe>
+<iframe src="`+printURL+`" title="课表"></iframe>
 </body></html>`)
 }
 

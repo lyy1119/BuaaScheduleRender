@@ -10,13 +10,13 @@ import (
 func TestWriteSchedulePageLogoutButton(t *testing.T) {
 	// 手动模式：含退出登录
 	rec := httptest.NewRecorder()
-	writeSchedulePage(rec, "20261", true)
+	writeSchedulePage(rec, "20261", true, false)
 	if !strings.Contains(rec.Body.String(), "退出登录") || !strings.Contains(rec.Body.String(), "/logout") {
 		t.Error("手动模式应显示退出登录按钮(/logout)")
 	}
 	// 自动登录模式：不含退出登录按钮
 	rec2 := httptest.NewRecorder()
-	writeSchedulePage(rec2, "20261", false)
+	writeSchedulePage(rec2, "20261", false, false)
 	if strings.Contains(rec2.Body.String(), "退出登录") {
 		t.Error("自动登录模式不应显示退出登录按钮")
 	}
@@ -25,6 +25,15 @@ func TestWriteSchedulePageLogoutButton(t *testing.T) {
 		if !strings.Contains(body, "/schedule/print?sem=20261") {
 			t.Error("课表页应包含纯课表 iframe/打印链接")
 		}
+		if !strings.Contains(body, "强制刷新") || !strings.Contains(body, "refresh=1") {
+			t.Error("课表页应提供强制刷新入口(refresh=1)")
+		}
+	}
+	// 带 refresh=1 的工具栏页：iframe/打印链接也应携带 refresh
+	rec3 := httptest.NewRecorder()
+	writeSchedulePage(rec3, "20261", false, true)
+	if !strings.Contains(rec3.Body.String(), "/schedule/print?sem=20261&refresh=1") {
+		t.Error("refresh 模式应透传到纯课表链接")
 	}
 }
 
