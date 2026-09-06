@@ -136,19 +136,34 @@ func (s *Schedule) calcLayout(portrait bool) layout {
 	return ly
 }
 
+// courseSeqByID 返回 CourseID → 展示序号（从 1 起）。
+// 序号与右侧"课程信息表"的条目编号同源（均按 CourseID 字典序），
+// 保证课表格中的课程号与右侧信息表一一对应。
+func (s *Schedule) courseSeqByID() map[string]int {
+	m := map[string]int{}
+	for i, ci := range s.CourseInfos() {
+		m[ci.CourseID] = i + 1
+	}
+	return m
+}
+
 // cellInfo 返回某一（周、星期、节次）格子命中的元素及其显示文本；无课则空。
 // 文本规则：
 //
-//	起始节次格 → "{起始节次} {FitName(课程名)}"（课名按列宽预算严格截断）
+//	课程起始格 → "{课程展示序号} {FitName(课程名)}"
+//	           （序号 = 该课程在右侧课程信息表中的编号，同一课程在课表中同号；
+//	             实际节次由行位置确定，不再重复标注节次数字）
 //	连堂后续节次格 → "*"
 func (s *Schedule) cellInfo(week, weekday, slot int) (string, *CourseElement) {
+	seq := s.courseSeqByID()
 	for i := range s.Elements {
 		e := &s.Elements[i]
 		if e.Weekday != weekday || !e.HasWeek(week) || slot < e.StartSlot || slot > e.EndSlot {
 			continue
 		}
 		if slot == e.StartSlot {
-			return fmt.Sprintf("%d %s", slot, FitName(e.Name, CellNameBudget)), e
+			no := seq[e.CourseID] // 课程展示序号，与右侧课程信息表一致
+			return fmt.Sprintf("%d %s", no, FitName(e.Name, CellNameBudget)), e
 		}
 		return "*", e
 	}
@@ -183,7 +198,7 @@ func (s *Schedule) RenderHTML(w io.Writer, opts RenderOptions) error {
 	fmt.Fprintf(&b, "  html, body { margin: 0; padding: 0; }\n")
 	fmt.Fprintf(&b, "  body { background: #eeeeee; font-family: 'Microsoft YaHei', Arial, sans-serif; color: #000; font-size: %.3fmm; }\n", ly.fontMM)
 	// 标题占 2 个单元格高度，字号独立于正文
-	fmt.Fprintf(&b, "  h1 { height: %.3fmm; line-height: %.3fmm; font-size: %.3fmm; margin: 0; text-align: left; overflow: hidden; }\n",
+	fmt.Fprintf(&b, "  h1 { height: %.3fmm; line-height: %.3fmm; font-size: %.3fmm; margin: 0; text-align: center; overflow: hidden; }\n",
 		ly.titleHMM, ly.titleHMM, ly.titleFontMM)
 	b.WriteString("  h2.info-title { font-size: 1em; margin: 0 0 0.2mm; text-align: center; font-weight: bold; }\n")
 	b.WriteString("  table { border-collapse: collapse; }\n")
@@ -200,8 +215,10 @@ func (s *Schedule) RenderHTML(w io.Writer, opts RenderOptions) error {
 	b.WriteString("  td.ps { border-left: " + cssStrong + "; white-space: nowrap; }\n")
 	b.WriteString("  td.course { white-space: nowrap; }\n")
 	b.WriteString("  td.course.star { color: #555; }\n")
-	// 右侧课程信息大格：宽度受容器约束、超宽自动换行；行高与单元格等高
-	b.WriteString("  td.info-cell { border-left: " + cssStrong + "; height: auto; text-align: left; vertical-align: top; white-space: normal; word-break: break-word; overflow-wrap: break-word; }\n")
+	// 右侧课程信息大格：宽度受容器约束、超宽自动换行；内容向上对齐。
+	// 注意用更高优先级选择器（table#main td.info-cell）覆盖通用的
+	// "vertical-align: middle"，确保浏览器真的顶对齐（此规则需在通用规则之后）。
+	b.WriteString("  table#main td.info-cell { border-left: " + cssStrong + "; height: auto; text-align: left; vertical-align: top; white-space: normal; word-break: break-word; overflow-wrap: break-word; }\n")
 	b.WriteString("  div.info-wrap { padding: 0 0.5mm 0 0.2mm; text-align: left; }\n")
 	fmt.Fprintf(&b, "  p.ci { margin: 0 0 %.3fmm; line-height: %.3fmm; text-align: left; white-space: normal; word-break: break-word; }\n",
 		ly.cellHMM, ly.lineHMM)

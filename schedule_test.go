@@ -57,23 +57,27 @@ func TestWeekStartDates(t *testing.T) {
 }
 
 // TestCellTextRules 验证课程格文本规则：
-// 起始节次格 = "起始节次 FitName(课名)"；连堂后续节次格 = "*"；停课/无课 = ""。
+// 课程起始格 = "课程展示序号 FitName(课名)"（序号与右侧课程信息表一致）；
+// 连堂后续节次格 = "*"；停课/无课 = ""。
+// 示例课表按 CourseID 字典序：CS-501(Python)=1 EN-202(大英)=2 M-101(高数)=3
+// P-101(大物)=4 P-301(形策)=5 PE-401(体育)=6 lin-alg-02(线代)=7。
 func TestCellTextRules(t *testing.T) {
 	s := NewSampleSchedule()
 	cases := []struct {
 		week, weekday, slot int
 		want                string
 	}{
-		{1, Monday, 1, "1 高等数学"},    // 高等数学A(上) 截断为 4 字
+		{1, Monday, 1, "3 高等数学"},    // 高数=序号3（M-101），课名截 4 字
 		{1, Monday, 2, "*"},         // 连堂续节
-		{1, Wednesday, 3, "3 高等数学"}, // 周三 3-4 节（同一课程另一元素）
+		{1, Wednesday, 3, "3 高等数学"}, // 同一课程另一元素，序号相同
 		{1, Wednesday, 4, "*"},
-		{1, Friday, 3, "3 大学物理"},      // 大学物理(上) 截断
-		{2, Friday, 3, ""},            // 双周停课（单周课）
-		{4, Friday, 3, ""},            // 双周停课
-		{7, Wednesday, 11, "11 形势与政"}, // 仅第 7 周；5 字课名截 4 字
+		{1, Friday, 3, "4 大学物理"},     // 大物=序号4（P-101）
+		{2, Friday, 3, ""},           // 双周停课（单周课）
+		{4, Friday, 3, ""},           // 双周停课
+		{7, Wednesday, 11, "5 形势与政"}, // 形策=序号5（P-301）；5 字课名截 4 字
 		{6, Wednesday, 11, ""},
-		{2, Tuesday, 6, "6 线性代数"}, // 第 2 周才开始；4 字课名刚好放下
+		{3, Saturday, 1, "1 Pyth"}, // Python=序号1（CS-501），第 3 周起
+		{2, Tuesday, 6, "7 线性代数"},  // 线代=序号7（lin-alg-02）
 		{2, Tuesday, 7, "*"},
 		{1, Saturday, 1, ""}, // Python 第 3 周才开始
 	}
@@ -172,12 +176,13 @@ func TestRenderHTML(t *testing.T) {
 	for _, want := range []string{
 		"<!DOCTYPE html>", "2026-2027学年第一学期课表（示例）",
 		"9月7日", "9月14日", "11月30日", "节次-时间表", "08:00-08:45",
-		"1 高等数学", "*", "3 高等数学", "11 形势与政",
-		`<div class="page">`,     // A4 页面容器
-		".page { width: 297.0mm", // 默认横向纸张
-		"table-layout: fixed",    // 表格宽度恒等于容器（整表完整显示）
-		"width: 100%",            // 不产生横向溢出
-		"font-size:",             // 字号以 mm 输出
+		"3 高等数学", "*", "4 大学物理", "5 形势与政", // 课程格 = 课程序号+截断课名
+		"table#main td.info-cell", // 信息区顶对齐规则
+		`<div class="page">`,      // A4 页面容器
+		".page { width: 297.0mm",  // 默认横向纸张
+		"table-layout: fixed",     // 表格宽度恒等于容器（整表完整显示）
+		"width: 100%",             // 不产生横向溢出
+		"font-size:",              // 字号以 mm 输出
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("渲染结果缺少 %q", want)
@@ -218,9 +223,10 @@ func TestRenderHTML(t *testing.T) {
 	if DateMaxText != "12月31日" {
 		t.Errorf("DateMaxText = %q, want 12月31日", DateMaxText)
 	}
-	// 课程格文本统计："1 高等数学" 应为 13（高数周一 1-2 节，每列起始格）
-	if got := strings.Count(html, "1 高等数学"); got != 13 {
-		t.Errorf(`"1 高等数学" 出现 %d 次, want 13`, got)
+	// 课程格文本统计："3 高等数学" = 高数两个元素(周一 1-2 与周三 3-4)的起始格
+	// 每列 1 格 × 13 周 × 2 段 = 26
+	if got := strings.Count(html, "3 高等数学"); got != 26 {
+		t.Errorf(`"3 高等数学" 出现 %d 次, want 26`, got)
 	}
 }
 
