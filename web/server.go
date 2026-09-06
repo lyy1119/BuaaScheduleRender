@@ -46,6 +46,9 @@ type Config struct {
 	// Debug 开启调试日志：每次 HTTP 请求(访问日志)、fetch 抓取详情等；
 	// 登录成功/失败、登出等关键事件在普通模式也会输出（若提供 Logger）。
 	Debug bool
+	// AutoClient 可选：自动登录模式预验证并注入的抓取客户端
+	//（由启动方完成登录验证后传入，避免 Web 内重复登录）。
+	AutoClient *fetch.Client
 	// Logger 输出日志；nil 时静默（Debug=true 时若未提供将使用 os.Stdout）。
 	Logger *log.Logger
 }
@@ -72,6 +75,11 @@ type userClient struct {
 	cli      *fetch.Client
 	lastSeen time.Time
 	mu       sync.Mutex // 串行化该用户的抓取（自动登录/取数竞争安全）
+
+	// cacheSem/cacheJSON：最近一次成功获取的课表 JSON 缓存（避免登录验证后
+	// 课表页重复请求同一学期）。
+	cacheSem  string
+	cacheJSON []byte
 }
 
 func newClientTable(idle time.Duration) *clientTable {
@@ -173,13 +181,17 @@ func (s *Server) cleanupIdle(now time.Time) {
 	}
 }
 
-// autoClient 返回自动登录模式的全局客户端（懒创建）。
+// autoClient 返回自动登录模式的全局客户端（懒创建；优先复用注入的 AutoClient）。
 func (s *Server) autoClient() *userClient {
 	s.clients.mu.Lock()
 	defer s.clients.mu.Unlock()
 	c, ok := s.clients.m["__auto__"]
 	if !ok {
-		c = &userClient{cli: fetch.NewClient(s.cfg.Username, s.cfg.Password), lastSeen: time.Now()}
+		cli := s.cfg.AutoClient
+		if cli == nil {
+			cli = fetch.NewClient(s.cfg.Username, s.cfg.Password)
+		}
+		c = &userClient{cli: cli, lastSeen: time.Now()}
 		s.clients.m["__auto__"] = c
 		s.debugf("自动登录会话创建：账号 %s", s.cfg.Username)
 	}
@@ -252,13 +264,25 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			writeLoginPage(w, "请输入账号与密码")
 			return
 		}
+		// 登录真实校验：抓取默认学期课表验证凭据，失败则留在登录页提示
+		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		defer cancel()
+		sem := fetch.AutoSemester(time.Now())
+		cli := fetch.NewClient(user, pass)
+		data, err := cli.FetchJSON(ctx, sem)
+		if err != nil {
+			s.logf("登录失败：账号 %s（%v）", user, err)
+			writeLoginPage(w, "登录失败："+html.EscapeString(err.Error()))
+			return
+		}
 		id := newSID()
-		s.addClient(id, &userClient{cli: fetch.NewClient(user, pass), lastSeen: time.Now()})
-		s.logf("登录：账号 %s（session %s…）", user, id[:8])
+		uc := &userClient{cli: cli, lastSeen: time.Now(), cacheSem: sem, cacheJSON: data}
+		s.addClient(id, uc)
+		s.logf("登录成功：账号 %s（session %s…）", user, id[:8])
 		http.SetCookie(w, &http.Cookie{
 			Name: sessionCookie, Value: id, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode,
 		})
-		http.Redirect(w, r, "/schedule", http.StatusFound)
+		http.Redirect(w, r, "/schedule?sem="+sem, http.StatusFound)
 	default:
 		w.Header().Set("Allow", "GET, POST")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -287,7 +311,8 @@ func (s *Server) handleSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	noCache(w)
 	sem := semesterOrAuto(r.URL.Query().Get("sem"))
-	writeSchedulePage(w, sem)
+	manual := s.cfg.Username == "" // 手动登录模式才显示"退出登录"
+	writeSchedulePage(w, sem, manual)
 }
 
 // handleSchedulePrint 纯课表页（用于打印；同样防缓存）。
@@ -306,16 +331,22 @@ func (s *Server) handleSchedulePrint(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 150*time.Second)
 	defer cancel()
 
-	s.debugf("fetch 开始：sem=%s", sem)
-	fstart := time.Now()
+	var data []byte
+	var err error
 	uc.mu.Lock()
-	data, err := uc.cli.FetchJSON(ctx, sem)
-	uc.mu.Unlock()
-	if err != nil {
-		s.debugf("fetch 失败：sem=%s（%s）", sem, err)
+	if uc.cacheSem == sem {
+		data = uc.cacheJSON
+		s.debugf("fetch 命中缓存：sem=%s", sem)
 	} else {
-		s.debugf("fetch 完成：sem=%s，%d 字节，%s", sem, len(data), time.Since(fstart).Round(time.Millisecond))
+		s.debugf("fetch 开始：sem=%s", sem)
+		data, err = uc.cli.FetchJSON(ctx, sem)
+		if err == nil {
+			uc.cacheSem, uc.cacheJSON = sem, data
+		} else {
+			s.debugf("fetch 失败：sem=%s（%s）", sem, err)
+		}
 	}
+	uc.mu.Unlock()
 	if err != nil {
 		s.logf("fetch error (sem=%s): %v", sem, err)
 		noCache(w)
@@ -407,9 +438,13 @@ func writeLoginPage(w http.ResponseWriter, errMsg string) {
 
 // writeSchedulePage 输出带工具栏的课表页：左侧学期输入+查询按钮，
 // 右侧打印按钮（跳转到纯课表页），下方 iframe 内嵌纯课表。
-func writeSchedulePage(w http.ResponseWriter, sem string) {
+func writeSchedulePage(w http.ResponseWriter, sem string, manual bool) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	escSem := html.EscapeString(sem)
+	logout := ""
+	if manual {
+		logout = `  <a class="btn-logout" href="/logout">退出登录</a>`
+	}
 	fmt.Fprint(w, `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8">
 <title>课表 `+escSem+`</title>
 <style>
@@ -425,6 +460,9 @@ func writeSchedulePage(w http.ResponseWriter, sem string) {
   .btn-print { text-decoration:none; padding:7px 16px; border:1px solid #1f6feb; border-radius:4px;
                color:#1f6feb; font-size:14px; }
   .btn-print:hover { background:#eaf2ff; }
+  .btn-logout { text-decoration:none; padding:7px 16px; border:1px solid #d33; border-radius:4px;
+                color:#d33; font-size:14px; margin-left:6px; }
+  .btn-logout:hover { background:#fdecec; }
   iframe { display:block; width:100%; height:calc(100vh - 54px); border:0; }
 </style></head><body>
 <div class="toolbar">
@@ -435,7 +473,7 @@ func writeSchedulePage(w http.ResponseWriter, sem string) {
     <button type="submit">查询</button>
   </form>
   <span class="spacer"></span>
-  <a class="btn-print" target="_blank" href="/schedule/print?sem=`+escSem+`">打印</a>
+  <a class="btn-print" target="_blank" href="/schedule/print?sem=`+escSem+`">打印</a>`+logout+`
 </div>
 <iframe src="/schedule/print?sem=`+escSem+`" title="课表"></iframe>
 </body></html>`)

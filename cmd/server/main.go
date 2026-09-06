@@ -11,12 +11,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net/http"
 	"os"
 	"time"
 
+	"github.com/lyy1119/BuaaScheduleRender/fetch"
 	"github.com/lyy1119/BuaaScheduleRender/web"
 )
 
@@ -46,7 +48,16 @@ func main() {
 		Logger:      log.New(os.Stdout, "[web] ", log.LstdFlags),
 	}
 	if cfg.Username != "" {
-		log.Printf("自动登录模式已启用（账号 %s，跳过登录页）", cfg.Username)
+		// 自动登录模式：启动即真实登录校验，失败直接报告"登录失败"退出
+		cli := fetch.NewClient(*user, *pass)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		data, err := cli.FetchJSON(ctx, fetch.AutoSemester(time.Now()))
+		cancel()
+		if err != nil {
+			log.Fatalf("登录失败：%v", err)
+		}
+		cfg.AutoClient = cli
+		log.Printf("自动登录模式已启用：账号 %s 登录验证通过（%d 字节，跳过登录页）", cfg.Username, len(data))
 	} else {
 		log.Printf("手动登录模式（访问 / 开始）")
 	}

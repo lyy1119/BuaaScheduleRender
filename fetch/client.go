@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -95,11 +96,7 @@ func (c *Client) FetchJSON(ctx context.Context, semester string) ([]byte, error)
 			return nil, err
 		}
 		if !looksLoggedIn(body) {
-			snip := strings.TrimSpace(string(body))
-			if len(snip) > 200 {
-				snip = snip[:200]
-			}
-			return nil, fmt.Errorf("登录后仍无法获取课表数据（响应: %s）", snip)
+			return nil, fmt.Errorf("登录后仍无法获取课表数据（%s）", describeBody(body))
 		}
 	}
 	return body, nil
@@ -130,7 +127,22 @@ func (c *Client) ensureLoggedIn(ctx context.Context) error {
 	if loginURL == "" {
 		return fmt.Errorf("访问 %s 未得到 SSO 跳转（HTTP %d）", index, resp.StatusCode)
 	}
-	return c.session.CASLogin(ctx, loginURL, c.user, c.pass)
+	if err := c.session.CASLogin(ctx, loginURL, c.user, c.pass); err != nil {
+		return err
+	}
+	// 登录成功后访问一次 gsmis 首页，确保服务端建立业务会话（GS_SESSIONID）
+	req2, err := http.NewRequestWithContext(ctx, http.MethodGet, index, nil)
+	if err != nil {
+		return err
+	}
+	req2.Header.Set("User-Agent", login.DefaultUserAgent)
+	resp2, err := c.session.HTTP.Do(req2)
+	if err != nil {
+		return fmt.Errorf("登录后访问 gsmis 首页失败: %w", err)
+	}
+	io.Copy(io.Discard, resp2.Body)
+	resp2.Body.Close()
+	return nil
 }
 
 func (c *Client) postData(ctx context.Context, semester string) ([]byte, error) {
@@ -167,3 +179,20 @@ func (c *Client) postData(ctx context.Context, semester string) ([]byte, error) 
 func looksLoggedIn(body []byte) bool {
 	return strings.Contains(string(body), `"code"`)
 }
+
+// describeBody 对非 JSON 返回给出简短描述：若为 HTML 则提取其标题与状态提示。
+func describeBody(body []byte) string {
+	txt := strings.TrimSpace(string(body))
+	if m := reTitle.FindSubmatch(body); m != nil {
+		title := strings.TrimSpace(string(m[1]))
+		if title != "" {
+			return "服务返回 HTML 页面，标题: " + title
+		}
+	}
+	if len(txt) > 160 {
+		txt = txt[:160]
+	}
+	return "响应: " + txt
+}
+
+var reTitle = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
