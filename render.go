@@ -32,6 +32,10 @@ const (
 	// 约束：周次列恰好容纳 4.5 个全角字符宽（如"12月29日"）；一个单元格容纳 1.5 个字符高。
 	fullCharsInWeekCol = 4.5
 	charHeightsInCell  = 1.5
+
+	// 连堂标记：课程起始格显示"课程序号 课名"，同一节课的后续连堂格显示该标记，
+	// 表示与上一格属于同一门课连续上课（见右侧课程信息表末尾的说明）。
+	continuationMark = "#"
 )
 
 // RenderOptions 控制渲染版式。
@@ -160,7 +164,7 @@ func (s *Schedule) courseSeqByID() map[string]int {
 //	课程起始格 → "{课程展示序号} {FitName(课程名)}"
 //	           （序号 = 该课程在右侧课程信息表中的编号，同一课程在课表中同号；
 //	             实际节次由行位置确定，不再重复标注节次数字）
-//	连堂后续节次格 → "*"
+//	连堂后续节次格 → continuationMark（"#"：表示与上一格同一门课连堂）
 func (s *Schedule) cellInfo(week, weekday, slot int) (string, *CourseElement) {
 	seq := s.courseSeqByID()
 	for i := range s.Elements {
@@ -172,7 +176,7 @@ func (s *Schedule) cellInfo(week, weekday, slot int) (string, *CourseElement) {
 			no := seq[e.CourseID] // 课程展示序号，与右侧课程信息表一致
 			return fmt.Sprintf("%d %s", no, FitName(e.Name, CellNameBudget)), e
 		}
-		return "*", e
+		return continuationMark, e
 	}
 	return "", nil
 }
@@ -229,6 +233,8 @@ func (s *Schedule) RenderHTML(w io.Writer, opts RenderOptions) error {
 	b.WriteString("  div.info-wrap { padding: 0 0.5mm 0 0.2mm; text-align: left; }\n")
 	fmt.Fprintf(&b, "  p.ci { margin: 0 0 %.3fmm; line-height: %.3fmm; text-align: left; white-space: normal; word-break: break-word; }\n",
 		ly.cellHMM, ly.lineHMM)
+	fmt.Fprintf(&b, "  p.ci-note { margin: %.3fmm 0 0; line-height: %.3fmm; text-align: left; color: #666; white-space: normal; word-break: break-word; }\n",
+		ly.cellHMM, ly.lineHMM)
 	b.WriteString("  span.ci-no { font-weight: bold; }\n")
 	b.WriteString("  span.ci-name { font-weight: bold; }\n")
 	b.WriteString("  .ci-line { color: #333; }\n")
@@ -272,8 +278,8 @@ func (s *Schedule) RenderHTML(w io.Writer, opts RenderOptions) error {
 				switch {
 				case text == "":
 					b.WriteString("<td class=\"course\"></td>")
-				case text == "*":
-					b.WriteString("<td class=\"course star\">*</td>")
+				case text == continuationMark:
+					fmt.Fprintf(&b, "<td class=\"course star\">%s</td>", esc(text))
 				default:
 					title := el.Name
 					if el.Teacher != "" {
@@ -314,6 +320,8 @@ func (s *Schedule) RenderHTML(w io.Writer, opts RenderOptions) error {
 						}
 						b.WriteString("</p>")
 					}
+					// 末尾说明：# 连堂标记的含义
+					b.WriteString("<p class=\"ci-note\"># 符号代表与上一格为同一课程、连堂上课。</p>")
 				}
 				b.WriteString("</div></td>")
 			default:

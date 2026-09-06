@@ -58,7 +58,7 @@ func TestWeekStartDates(t *testing.T) {
 
 // TestCellTextRules 验证课程格文本规则：
 // 课程起始格 = "课程展示序号 FitName(课名)"（序号与右侧课程信息表一致）；
-// 连堂后续节次格 = "*"；停课/无课 = ""。
+// 连堂后续节次格 = "#"；停课/无课 = ""。
 // 示例课表按 CourseID 字典序：CS-501(Python)=1 EN-202(大英)=2 M-101(高数)=3
 // P-101(大物)=4 P-301(形策)=5 PE-401(体育)=6 lin-alg-02(线代)=7。
 func TestCellTextRules(t *testing.T) {
@@ -68,9 +68,9 @@ func TestCellTextRules(t *testing.T) {
 		want                string
 	}{
 		{1, Monday, 1, "3 高等数学"},    // 高数=序号3（M-101），课名截 4 字
-		{1, Monday, 2, "*"},         // 连堂续节
+		{1, Monday, 2, "#"},         // 连堂续节
 		{1, Wednesday, 3, "3 高等数学"}, // 同一课程另一元素，序号相同
-		{1, Wednesday, 4, "*"},
+		{1, Wednesday, 4, "#"},
 		{1, Friday, 3, "4 大学物理"},     // 大物=序号4（P-101）
 		{2, Friday, 3, ""},           // 双周停课（单周课）
 		{4, Friday, 3, ""},           // 双周停课
@@ -78,7 +78,7 @@ func TestCellTextRules(t *testing.T) {
 		{6, Wednesday, 11, ""},
 		{3, Saturday, 1, "1 Pyth"}, // Python=序号1（CS-501），第 3 周起
 		{2, Tuesday, 6, "7 线性代数"},  // 线代=序号7（lin-alg-02）
-		{2, Tuesday, 7, "*"},
+		{2, Tuesday, 7, "#"},
 		{1, Saturday, 1, ""}, // Python 第 3 周才开始
 	}
 	for _, c := range cases {
@@ -176,7 +176,7 @@ func TestRenderHTML(t *testing.T) {
 	for _, want := range []string{
 		"<!DOCTYPE html>", "2026-2027学年第一学期课表（示例）",
 		"9月7日", "9月14日", "11月30日", "节次-时间表", "08:00-08:45",
-		"3 高等数学", "*", "4 大学物理", "5 形势与政", // 课程格 = 课程序号+截断课名
+		"3 高等数学", "#", "4 大学物理", "5 形势与政", // 课程格 = 课程序号+截断课名
 		"table#main td.info-cell", // 信息区顶对齐规则
 		`<div class="page">`,      // A4 页面容器
 		".page { width: 297.0mm",  // 默认横向纸张
@@ -213,8 +213,12 @@ func TestRenderHTML(t *testing.T) {
 			t.Errorf("课程信息表缺少排序条目 %q", want)
 		}
 	}
+	// 连堂标记说明段落存在
+	if !strings.Contains(html, "# 符号代表") || !strings.Contains(html, "p.ci-note") {
+		t.Error("缺少 # 连堂标记的说明段落 (p.ci-note)")
+	}
 	// 课程信息不使用 <ol>/<li> 列表元素，改用 <p>
-	for _, forbid := range []string{"<ol", "<li>", "</li>", "ci-times", "ci-note", "（高数A）", "上课时间"} {
+	for _, forbid := range []string{"<ol", "<li>", "</li>", "ci-times", "（高数A）", "上课时间"} {
 		if strings.Contains(html, forbid) {
 			t.Errorf("课程信息表不应包含 %q", forbid)
 		}
