@@ -43,7 +43,10 @@ type Config struct {
 	Portrait bool
 	// SessionIdle 会话空闲过期时间；<=0 用默认 30 分钟。
 	SessionIdle time.Duration
-	// Logger 输出日志；nil 时静默。
+	// Debug 开启调试日志：每次 HTTP 请求(访问日志)、fetch 抓取详情等；
+	// 登录成功/失败、登出等关键事件在普通模式也会输出（若提供 Logger）。
+	Debug bool
+	// Logger 输出日志；nil 时静默（Debug=true 时若未提供将使用 os.Stdout）。
 	Logger *log.Logger
 }
 
@@ -55,6 +58,7 @@ type Server struct {
 	clients *clientTable
 	mux     *http.ServeMux
 	logf    func(string, ...any)
+	debugf  func(string, ...any)
 }
 
 type clientTable struct {
@@ -79,9 +83,19 @@ func New(cfg Config) *Server {
 	if cfg.SessionIdle <= 0 {
 		cfg.SessionIdle = 30 * time.Minute
 	}
-	s := &Server{cfg: cfg, clients: newClientTable(cfg.SessionIdle), logf: func(string, ...any) {}}
+	if cfg.Logger == nil && cfg.Debug {
+		cfg.Logger = log.New(log.Writer(), "[web] ", log.LstdFlags)
+	}
+	s := &Server{
+		cfg: cfg, clients: newClientTable(cfg.SessionIdle),
+		logf:   func(string, ...any) {},
+		debugf: func(string, ...any) {},
+	}
 	if cfg.Logger != nil {
 		s.logf = cfg.Logger.Printf
+		if cfg.Debug {
+			s.debugf = cfg.Logger.Printf
+		}
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleRoot)
@@ -94,7 +108,36 @@ func New(cfg Config) *Server {
 }
 
 // Handler 返回可供 ListenAndServe 使用的处理器。
-func (s *Server) Handler() http.Handler { return s.mux }
+// Debug 模式会包一层访问日志（方法/路径/状态/耗时/来源）。
+func (s *Server) Handler() http.Handler {
+	if !s.cfg.Debug {
+		return s.mux
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		s.mux.ServeHTTP(rec, r)
+		s.debugf("%s %s?%s -> %d (%dB, %s) from %s",
+			r.Method, r.URL.Path, r.URL.RawQuery, rec.status, rec.bytes, time.Since(start).Round(time.Millisecond), r.RemoteAddr)
+	})
+}
+
+// statusRecorder 记录响应状态码与字节数，供访问日志使用。
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Write(p []byte) (int, error) {
+	r.bytes += len(p)
+	return r.ResponseWriter.Write(p)
+}
 
 // ---- 会话存取 ----
 
@@ -138,6 +181,7 @@ func (s *Server) autoClient() *userClient {
 	if !ok {
 		c = &userClient{cli: fetch.NewClient(s.cfg.Username, s.cfg.Password), lastSeen: time.Now()}
 		s.clients.m["__auto__"] = c
+		s.debugf("自动登录会话创建：账号 %s", s.cfg.Username)
 	}
 	return c
 }
@@ -210,6 +254,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		id := newSID()
 		s.addClient(id, &userClient{cli: fetch.NewClient(user, pass), lastSeen: time.Now()})
+		s.logf("登录：账号 %s（session %s…）", user, id[:8])
 		http.SetCookie(w, &http.Cookie{
 			Name: sessionCookie, Value: id, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode,
 		})
@@ -222,6 +267,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if ck, err := r.Cookie(sessionCookie); err == nil {
+		s.logf("登出：session %s…", ck.Value[:minInt(8, len(ck.Value))])
 		s.removeClient(ck.Value)
 		http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1})
 	}
@@ -260,9 +306,16 @@ func (s *Server) handleSchedulePrint(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 150*time.Second)
 	defer cancel()
 
+	s.debugf("fetch 开始：sem=%s", sem)
+	fstart := time.Now()
 	uc.mu.Lock()
 	data, err := uc.cli.FetchJSON(ctx, sem)
 	uc.mu.Unlock()
+	if err != nil {
+		s.debugf("fetch 失败：sem=%s（%s）", sem, err)
+	} else {
+		s.debugf("fetch 完成：sem=%s，%d 字节，%s", sem, len(data), time.Since(fstart).Round(time.Millisecond))
+	}
 	if err != nil {
 		s.logf("fetch error (sem=%s): %v", sem, err)
 		noCache(w)
@@ -278,6 +331,7 @@ func (s *Server) handleSchedulePrint(w http.ResponseWriter, r *http.Request) {
 	}
 	noCache(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	s.debugf("渲染课表：sem=%s，%d 周，%d 门课", sem, sched.NumWeeks, len(sched.CourseInfos()))
 	opts := render.RenderOptions{Portrait: s.cfg.Portrait}
 	if err := render.RenderHTML(w, sched, opts); err != nil {
 		s.logf("render error: %v", err)
@@ -393,4 +447,11 @@ func writeErrorPage(w http.ResponseWriter, msg string) {
 	fmt.Fprint(w, pageBase("错误 - 课表"))
 	fmt.Fprint(w, `<div class="card"><h1>课表加载失败</h1><div class="err">`+msg+`</div>
 <div class="hint"><a href="/schedule">返回重试</a></div></div></body></html>`)
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
