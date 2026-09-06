@@ -7,42 +7,132 @@ import (
 	"strings"
 )
 
-// 版式与框线规则（不追求与 Excel 逐磅一致，重在层次对比）：
-//   - 主表外框 2px 粗线；表头(周次/日期行)下沿 2px 粗线；
-//   - 网格内部一律 1px 细线；课程格区域与右侧"节次-时间表/课程信息表"之间
-//     的竖向分隔用 2px 粗线；右侧信息区内部不画网格线；
-//   - 列宽按比例分配（table-layout:fixed），表格宽度恒等于容器，不产生横向溢出，
-//     右侧课程信息列宽度受容器约束，内容超出可用宽度时自动换行；
-//   - 整个课表包在 div.sheet 中；screen 上容器最大宽度由视口高度与宽高比
-//     1.414:1（A4 纸张长宽比 √2）推出（Portrait=true 时翻转成 1:1.414 竖版），
-//     打印方向由 @page 按同一参数输出 A4 横/纵。
+// 版式与框线规则：
+//   - 页面固定为 A4 纸大小（默认横向 297×210mm；Portrait=true 翻转 210×297mm），
+//     内边距 6mm → 内容可用区 = 纸张 − 12mm。整个课表以"单元格"为单位排布：
+//     标题占 2 个单元格高度，表格共 14×7+2 = 100 个单元格高度；
+//   - 主表外框与表头下沿用 2px 粗线，网格内部 1px 细线，课程格与右侧
+//     "节次-时间表/课程信息" 之间的竖向分隔用 2px 粗线；
+//   - 文字高度（除标题外）全表一致：由单元格高/宽共同约束、先取 mm 计算
+//     再换算百分比（行高、列宽）输出到 CSS。
 const (
 	cssThin   = "1px solid #000"
 	cssStrong = "2px solid #000"
-)
 
-// PageRatio 是宽高比的基准（A4 纸张长宽比 √2 ≈ 1.414）。
-const PageRatio = 1.414
+	// 单元格行模型：表格 14 节 × 7 天 + 2 个表头行 = 100 行；标题另占 2 行。
+	tableCellRows = SlotsPerDay*7 + 2
+	titleCellRows = 2
+	// 单元格宽度模型：星期列/节次列各 0.5 格，周次列每列 1 格，
+	// 右侧节次-时间表的节次列 0.5 格、时间列最少 2 格（其余空白自动补全）。
+	cellWDayCol   = 0.5 // 星期列（A）
+	cellWSlotCol  = 0.5 // 节次/周次列（B）
+	cellWWeekCol  = 1.0 // 周次列
+	cellWPSlotCol = 0.5 // 右侧节次列（P）
+	cellWTimeCol  = 2.0 // 右侧时间列（Q）的最小宽度
+	// 约束：周次列恰好容纳 4.5 个全角字符宽（如"12月29日"）；一个单元格容纳 1.5 个字符高。
+	fullCharsInWeekCol = 4.5
+	charHeightsInCell  = 1.5
+)
 
 // RenderOptions 控制渲染版式。
 type RenderOptions struct {
-	// Portrait 控制宽高比是否翻转：false（默认）横向，宽:高 = 1.414:1；
-	// true 竖版，宽:高 = 1:1.414，用于竖着打印（打印 @page 同步 A4 纵向）。
+	// Portrait 为 true 时页面翻转为 A4 纵向（210×297mm），用于竖着打印。
 	Portrait bool
 }
 
-// 计算课程单元格宽度
-// 星期列、周次节次列、节次表的节次列按照CellWidth的1/2绘制
-// 单元格大小为 百分比
-func (s *Schedule) calCellWidthHeight() (float64, float64) {
-	return 5.6, 2
+// layout 是一份 A4 页面全部版式参数（同时由同一套计算得出，先 mm 后换算百分比）。
+type layout struct {
+	portrait bool
+
+	pageWMM, pageHMM float64 // 纸张尺寸
+	usableWMM        float64 // 内容可用宽度 = 纸宽 - 2×6mm
+	usableHMM        float64 // 内容可用高度 = 纸高 - 2×6mm
+
+	cellHMM float64 // 单元格高度（mm）
+	cellWMM float64 // 基准单元格宽度（mm，= 周次列宽度）
+	fontMM  float64 // 正文字号（mm，除标题外全表一致）
+
+	titleHMM    float64 // 标题占用高度（2 个单元格高）
+	titleFontMM float64 // 标题字号（可不同于正文）
+
+	colMM  []float64 // 各列宽度（mm，长度 = NumWeeks+4）
+	colPct []float64 // 各列宽度换算为占可用宽度的百分比（合计 ≈ 100%）
+
+	lineHMM float64 // 行高（mm，= 单元格高度，供信息区文本行使用）
 }
 
-// 计算合适的字体大小
-// 字体大小为 mm
-// 字体大小应根据格子的宽和高计算得到
-func (s *Schedule) calFontSize() float64 {
-	return 2.5
+// 纸张与内边距（毫米）。
+const (
+	pagePadMM = 6.0
+	pageGapMM = 2 * pagePadMM
+)
+
+// calcLayout 合并计算"行高、列宽、文字大小"（用户要求同时得出，故为单一函数）：
+//
+//	高度方向：cellH = 可用高 / (100 表格行 + 2 标题行)
+//	           字体上限 fs_h = cellH / 1.5（一格容纳 1.5 个字符高）
+//	宽度方向：先假设右侧取最小值，把可用宽均分给各列单位：
+//	           W0 = 可用宽 / (NumWeeks + 3.5)     （0.5+0.5+N+0.5+2 = N+3.5）
+//	           字体上限 fs_w = W0 / 4.5（周列恰好容纳 4.5 个全角字符）
+//	字号 fs = min(fs_h, fs_w)
+//	   · 若高度更紧张（fs=fs_h）：用 fs 反推基准列宽 cellW = fs×4.5，
+//	     表格（除右侧外）收窄，剩余宽度被右侧"时间/课程信息"列自动补全；
+//	   · 若宽度更紧张（fs=fs_w）：列宽维持 W0，右侧取最小宽度 2×cellW。
+//	输出同时给出 mm 值与换算好的百分比（列宽占可用宽、行高 line-height 相对字号）。
+func (s *Schedule) calcLayout(portrait bool) layout {
+	ly := layout{portrait: portrait}
+	if portrait {
+		ly.pageWMM, ly.pageHMM = 210, 297
+	} else {
+		ly.pageWMM, ly.pageHMM = 297, 210
+	}
+	ly.usableWMM = ly.pageWMM - pageGapMM
+	ly.usableHMM = ly.pageHMM - pageGapMM
+
+	totalUnits := tableCellRows + titleCellRows
+	ly.cellHMM = ly.usableHMM / float64(totalUnits)
+	ly.titleHMM = float64(titleCellRows) * ly.cellHMM
+
+	// 宽度方向（含右侧最小 0.5+2）
+	units := cellWDayCol + cellWSlotCol + float64(s.NumWeeks)*cellWWeekCol + cellWPSlotCol + cellWTimeCol
+	w0 := ly.usableWMM / units
+
+	fsH := ly.cellHMM / charHeightsInCell
+	fsW := w0 / fullCharsInWeekCol
+	if fsH <= fsW {
+		// 高度更紧张：采用高度定出的字号，并反推（收窄）基准列宽
+		ly.fontMM = fsH
+		ly.cellWMM = fsH * fullCharsInWeekCol
+	} else {
+		// 宽度更紧张：列宽保持不变（恰为 4.5 全角字符），字号由宽度定
+		ly.fontMM = fsW
+		ly.cellWMM = w0
+	}
+
+	// 各列宽（mm）：A/B/P 半格、周次列整格；Q = 右侧自动补全（≥ 2 格）
+	half := ly.cellWMM / 2
+	ly.colMM = make([]float64, 0, s.NumWeeks+4)
+	ly.colMM = append(ly.colMM, half, half) // A 星期, B 节次
+	for w := 1; w <= s.NumWeeks; w++ {
+		ly.colMM = append(ly.colMM, ly.cellWMM)
+	}
+	ly.colMM = append(ly.colMM, half) // P 节次列
+	q := ly.usableWMM - (half*2 + float64(s.NumWeeks)*ly.cellWMM + half)
+	if q < cellWTimeCol*ly.cellWMM {
+		q = cellWTimeCol * ly.cellWMM
+	}
+	ly.colMM = append(ly.colMM, q) // Q 时间/课程信息列
+
+	ly.colPct = make([]float64, len(ly.colMM))
+	for i, mm := range ly.colMM {
+		ly.colPct[i] = mm / ly.usableWMM * 100
+	}
+
+	// 行高（供信息区文本等使用，与单元格等高；以百分比 = 相对字号）
+	ly.lineHMM = ly.cellHMM
+	// 标题字号略小于两格高度以便垂直居中，允许与正文不同
+	ly.titleFontMM = ly.cellHMM * 2 * 0.85
+	return ly
 }
 
 // cellInfo 返回某一（周、星期、节次）格子命中的元素及其显示文本；无课则空。
@@ -71,87 +161,73 @@ func (s *Schedule) CellText(week, weekday, slot int) string {
 }
 
 // RenderHTML 把课表渲染成一个完整、自包含（内嵌 CSS）、零脚本的静态 HTML 文档。
-//
-// 布局要点：
-//  1. 整个课表包在 <div class="sheet"> 中；不使用任何内部滚动条与裁切。
-//     表格 table-layout:fixed、width:100%，其宽度恒等于容器宽度，
-//     因此整表（含右侧课程信息列）始终在容器内完整显示、无横向溢出；
-//  2. 屏幕预览时容器最大宽度 = min(100%, 视口高度 × 宽高比 1.414)，
-//     Portrait=true 时比值翻转（竖版更窄）；打印时 @page 为 A4 横/纵；
-//  3. 右侧课程信息列宽度受容器约束：内容超出该列可用宽度时自动换行，
-//     不会撑宽表格；主网格列（周次、节次等）因 fixed 布局保持等比列宽。
+// 页面固定为 A4 纸张大小；所有行高、列宽、字号均由 calcLayout 一次计算，
+// 列宽与行高以百分比、字号以 mm 输出；表格下方不输出任何提示文字。
 func (s *Schedule) RenderHTML(w io.Writer, opts RenderOptions) error {
-	fontSize := s.calFontSize()
-	cellWidth, cellHeight := s.calCellWidthHeight()
 	if err := s.Validate(); err != nil {
 		return fmt.Errorf("渲染被拒绝：课表数据不合法: %w", err)
 	}
 	esc := func(v string) string { return template.HTMLEscapeString(v) }
 
-	orient := "横向"
+	ly := s.calcLayout(opts.Portrait)
 
 	var b strings.Builder
 	b.WriteString("<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"UTF-8\">\n")
 	fmt.Fprintf(&b, "<title>%s</title>\n", esc(s.Title))
 	b.WriteString("<style>\n")
-	// @page 必须位于样式顶层（不能嵌在 @media print 内），按方向动态输出
-	// fmt.Fprintf(&b, "  /* 打印纸张方向：%s */\n  %s\n", esc(orient), opts.pageCSS())
-	b.WriteString(`  .page { width: 297mm; height: 210mm; margin: 10mm auto; padding: 6mm; overflow:hidden; background: white; }
-  html, body { margin: 0; padding: 0; }`)
-	fmt.Fprintf(&b, "body { background: #eeeeee; font-family: 'Microsoft YaHei', Arial, sans-serif; color: #000; font-size: %.1fmm;}", fontSize)
-	b.WriteString(` h1 { font-size: 18px; text-align: center; margin: 0 0 8px; }
-  h2.info-title { font-size: 12px; margin: 0 0 6px; text-align: center; }
-  table { border-collapse: collapse; }
-  /* 表格宽度恒等于容器：固定布局 + 100% 宽度 → 整表完整显示，绝不横向溢出 */
-  table#main { width: 100%; table-layout: fixed; border: ` + cssStrong + `; }
-  table#main th, table#main td { border: ` + cssThin + `; padding: 1px 3px; text-align: center; }
-  thead { display: table-header-group; }
-  thead th { background: #f0f0f0; font-weight: bold; white-space: nowrap; }
-  thead tr:nth-child(2) th { border-bottom: ` + cssStrong + `; }
-  td.weekday { background: #f0f0f0; font-weight: bold; white-space: nowrap; }
-  td.time { white-space: nowrap; }
-  td.ps { border-left: ` + cssStrong + `; white-space: nowrap; } /* 时间表/信息表与课程格的竖向粗分隔 */
-  td.course { white-space: nowrap; overflow: hidden; }             /* 课程格不折行 */
-  td.course.star { color: #555; }
-  /* 右侧课程信息列：宽度=剩余可用宽度，内容超宽自动换行 */
-  td.info-cell { border-left: ` + cssStrong + `; text-align: left; vertical-align: top; white-space: normal; word-break: break-word; overflow-wrap: break-word; }
-  div.info-wrap { padding: 2px 6px 2px 2px; }
-  p.ci { margin: 0 0 6px; text-align: left; white-space: normal; word-break: break-word; }
-  span.ci-no { font-weight: bold; }
-  span.ci-name { font-weight: bold; }
-  .ci-line { color: #333; }
-  .foot, .tip { text-align: center; margin: 4px 0 0; }
-</style>`)
+	// .page：整页固定为 A4 纸张尺寸（默认横向，Portrait 翻转纵向），内边距 6mm。
+	// box-sizing:border-box 使内容可用区 = 纸面 − 12mm，与版式计算一致。
+	fmt.Fprintf(&b, "  .page { width: %.1fmm; height: %.1fmm; margin: 10mm auto; padding: %.1fmm; overflow: hidden; box-sizing: border-box; background: white; }\n",
+		ly.pageWMM, ly.pageHMM, pagePadMM)
+	fmt.Fprintf(&b, "  html, body { margin: 0; padding: 0; }\n")
+	fmt.Fprintf(&b, "  body { background: #eeeeee; font-family: 'Microsoft YaHei', Arial, sans-serif; color: #000; font-size: %.3fmm; }\n", ly.fontMM)
+	// 标题占 2 个单元格高度，字号独立于正文
+	fmt.Fprintf(&b, "  h1 { height: %.3fmm; line-height: %.3fmm; font-size: %.3fmm; margin: 0; text-align: center; overflow: hidden; }\n",
+		ly.titleHMM, ly.titleHMM, ly.titleFontMM)
+	b.WriteString("  h2.info-title { font-size: 1em; margin: 0 0 0.2mm; text-align: center; font-weight: bold; }\n")
+	b.WriteString("  table { border-collapse: collapse; }\n")
+	// 表格宽度恒等于容器；fixed 布局 + 100% 宽度 → 整表完整显示、无横向溢出
+	b.WriteString("  table#main { width: 100%; table-layout: fixed; border: " + cssStrong + "; }\n")
+	// 单元格高度固定 = cellH；文字高度全表一致（标题除外）
+	fmt.Fprintf(&b, "  table#main th, table#main td { border: %s; box-sizing: border-box; height: %.3fmm; padding: 0 0.3mm; text-align: center; vertical-align: middle; overflow: hidden; }\n",
+		cssThin, ly.cellHMM)
+	b.WriteString("  thead { display: table-header-group; }\n")
+	b.WriteString("  thead th { background: #f0f0f0; font-weight: bold; white-space: nowrap; }\n")
+	b.WriteString("  thead tr:nth-child(2) th { border-bottom: " + cssStrong + "; }\n")
+	b.WriteString("  td.weekday { background: #f0f0f0; font-weight: bold; white-space: nowrap; }\n")
+	b.WriteString("  td.time { white-space: nowrap; }\n")
+	b.WriteString("  td.ps { border-left: " + cssStrong + "; white-space: nowrap; }\n")
+	b.WriteString("  td.course { white-space: nowrap; }\n")
+	b.WriteString("  td.course.star { color: #555; }\n")
+	// 右侧课程信息大格：宽度受容器约束、超宽自动换行；行高与单元格等高
+	b.WriteString("  td.info-cell { border-left: " + cssStrong + "; height: auto; text-align: left; vertical-align: top; white-space: normal; word-break: break-word; overflow-wrap: break-word; }\n")
+	b.WriteString("  div.info-wrap { padding: 0 0.5mm 0 0.2mm; }\n")
+	fmt.Fprintf(&b, "  p.ci { margin: 0 0 %.3fmm; line-height: %.3fmm; text-align: left; white-space: normal; word-break: break-word; }\n",
+		ly.cellHMM, ly.lineHMM)
+	b.WriteString("  span.ci-no { font-weight: bold; }\n")
+	b.WriteString("  span.ci-name { font-weight: bold; }\n")
+	b.WriteString("  .ci-line { color: #333; }\n")
+	b.WriteString("</style>\n")
 	b.WriteString("</head>\n<body>\n")
-	// ---------- 比例容器：包住整份课表 ----------
+
+	// ---------- A4 页面容器 ----------
 	b.WriteString("<div class=\"page\">\n")
 	fmt.Fprintf(&b, "<h1>%s</h1>\n", esc(s.Title))
 
 	// ---------- 主课表 ----------
-	// 行宽限制
 	b.WriteString("<table id=\"main\">\n<colgroup>")
-	// mainColPcts 主表列宽分配（百分比，合计 100%）：A 星期 / B 节次 较窄；
-	// 13 个周次列等宽（锚定"12月31日"日期单行所需宽度）；P/Q 为右侧
-	// "节次-时间表/课程信息"列——周一区段显示节次与时间，周二~周日该两列合并
-	// 放置课程信息表，宽度 = 剩余百分比，随容器伸缩并在超宽时自动换行。
-	var mainColPcts = []float64{
-		cellWidth / 2, cellWidth / 2, // A 星期, B 节次
-		5.6, 5.6, 5.6, 5.6, 5.6, 5.6, 5.6, 5.6, 5.6, 5.6, 5.6, 5.6, 5.6, // 周次 ×13
-		3.0, 20.0, // P 节次, Q 时间/课程信息
-	}
-	for _, p := range mainColPcts {
-		fmt.Fprintf(&b, "<col style=\"width:%.4g%%\">", p)
+	for _, p := range ly.colPct {
+		fmt.Fprintf(&b, "<col style=\"width:%.3f%%\">", p)
 	}
 	b.WriteString("</colgroup>\n<thead>\n<tr>")
-
-	// 表头第 1 行：星期(A, 跨 2 行) | 周次(B1) | 周次编号 1..N(C1..) | 节次-时间表(P1:Q1)
+	// 表头第 1 行：星期(A, 跨 2 行) | 周次(B1) | 周次编号 1..N | 节次-时间表(P1:Q1)
 	b.WriteString("<th rowspan=\"2\">星期</th><th>周次</th>")
 	for w := 1; w <= s.NumWeeks; w++ {
 		fmt.Fprintf(&b, "<th>%d</th>", w)
 	}
 	b.WriteString("<th colspan=\"2\">节次-时间表</th>")
 	b.WriteString("</tr>\n<tr>")
-	// 表头第 2 行：节次(B2) | 每周一日期(C2..，强制单行) | 节次(P2)/时间(Q2)
+	// 表头第 2 行：节次(B2) | 每周一日期（强制单行） | 节次(P2)/时间(Q2)
 	b.WriteString("<th>节次</th>")
 	for w := 1; w <= s.NumWeeks; w++ {
 		fmt.Fprintf(&b, "<th>%s</th>", esc(s.WeekStart(w).Format("1月2日")))
@@ -188,18 +264,18 @@ func (s *Schedule) RenderHTML(w io.Writer, opts RenderOptions) error {
 			case day == Monday: // 周一区段：右侧显示节次-时间表
 				fmt.Fprintf(&b, "<td class=\"ps\">%d</td><td class=\"ps time\">%s</td>", slot, SlotTimes[slot-1])
 			case day == Tuesday && slot == 1:
-				// 周二~周日右侧 P/Q 区域：合并大格，内嵌"课程信息表"（宽度受容器约束，超宽自动换行）
+				// 周二~周日右侧 P/Q 合并大格：课程信息表（按 CourseID 去重排序）
 				fmt.Fprintf(&b, "<td class=\"info-cell\" colspan=\"2\" rowspan=\"%d\">", 6*SlotsPerDay)
 				b.WriteString("<div class=\"info-wrap\">")
 				b.WriteString("<h2 class=\"info-title\">课程信息</h2>")
-				infos := s.CourseInfos() // 已按 CourseID 字典序排序
+				infos := s.CourseInfos()
 				if len(infos) == 0 {
 					b.WriteString("<p class=\"ci\">（本学期无课程）</p>")
 				} else {
 					for i := range infos {
 						ci := &infos[i]
-						// 每条课程信息为一个 <p>（左对齐），不使用 <ol>/<li> 列表；
-						// 完整课程名 | 教师 | 教室 显示在同一行，超出列宽自动换行
+						// 每条课程信息为一个 <p>（左对齐），同一行展示 课名|教师|教室，
+						// 超出列宽自动换行
 						b.WriteString("<p class=\"ci\">")
 						fmt.Fprintf(&b, "<span class=\"ci-no\">%d.</span> <span class=\"ci-name\">%s</span>",
 							i+1, esc(ci.Name))
@@ -215,17 +291,13 @@ func (s *Schedule) RenderHTML(w io.Writer, opts RenderOptions) error {
 					}
 				}
 				b.WriteString("</div></td>")
-			default: // 周二~周日的其余行：P/Q 已被上方信息表大格覆盖，无需输出
+			default:
 			}
 			b.WriteString("</tr>\n")
 		}
 	}
 	b.WriteString("</tbody>\n</table>\n")
-
-	fmt.Fprintf(&b, "<p class=\"foot\">第 1 周周一起始日期：%s，共 %d 周 · 版面：A4 %s（宽高比 %.3f:1）</p>\n",
-		esc(s.FirstMonday.Format("2006年1月2日")), s.NumWeeks, orient, PageRatio)
-	b.WriteString("<p class=\"tip\">打印提示：浏览器中按 Ctrl+P，请选择 A4 纸张（方向已按版面设置）。</p>\n")
-	b.WriteString("</div>\n") // .sheet
+	b.WriteString("</div>\n") // .page
 	b.WriteString("</body>\n</html>\n")
 
 	_, err := io.WriteString(w, b.String())

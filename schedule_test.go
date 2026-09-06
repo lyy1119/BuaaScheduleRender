@@ -173,20 +173,25 @@ func TestRenderHTML(t *testing.T) {
 		"<!DOCTYPE html>", "2026-2027学年第一学期课表（示例）",
 		"9月7日", "9月14日", "11月30日", "节次-时间表", "08:00-08:45",
 		"1 高等数学", "*", "3 高等数学", "11 形势与政",
-		`<div class="sheet landscape">`,              // 默认横向比例容器
-		"@page { size: A4 landscape; margin: 8mm; }", // 打印方向
-		"table-layout: fixed",                        // 表格宽度恒等于容器（整表完整显示）
-		"width: 100%",                                // 不产生横向溢出
+		`<div class="page">`,     // A4 页面容器
+		".page { width: 297.0mm", // 默认横向纸张
+		"table-layout: fixed",    // 表格宽度恒等于容器（整表完整显示）
+		"width: 100%",            // 不产生横向溢出
+		"font-size:",             // 字号以 mm 输出
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("渲染结果缺少 %q", want)
 		}
 	}
-	// 不使用任何内部滚动容器/滚动条：整表完整显示
-	for _, forbid := range []string{"viewport", "overflow: auto", "overflow: scroll"} {
+	// 表格下方不再输出起始日期/打印提示等文字
+	for _, forbid := range []string{"第 1 周周一起始日期", "打印提示", "class=\"foot\"", "class=\"tip\"", "viewport", "overflow: auto", "overflow: scroll", "sheet landscape", "@page"} {
 		if strings.Contains(html, forbid) {
-			t.Errorf("渲染结果不应包含滚动机制 %q", forbid)
+			t.Errorf("渲染结果不应包含 %q", forbid)
 		}
+	}
+	// 列数量 = NumWeeks + 4（A/B + 13 周次 + P/Q）
+	if got := strings.Count(html, "<col "); got != 13+4 {
+		t.Errorf("colgroup 列数 = %d, want 17", got)
 	}
 	// 课程信息表：7 条 <p>、按 CourseID 排序、带 1..7 展示序号
 	if got := strings.Count(html, `<p class="ci">`); got != 7 {
@@ -217,25 +222,52 @@ func TestRenderHTML(t *testing.T) {
 	if got := strings.Count(html, "1 高等数学"); got != 13 {
 		t.Errorf(`"1 高等数学" 出现 %d 次, want 13`, got)
 	}
-	// 主表列宽分配：17 列且百分比合计约为 100%（保证 fixed 布局下不溢出）
-	var mainColPcts = []float64{
-		2.8, 2.8, // A 星期, B 节次
-		5.6, 5.6, 5.6, 5.6, 5.6, 5.6, 5.6, 5.6, 5.6, 5.6, 5.6, 5.6, 5.6, // 周次 ×13
-		3.0, 20.0, // P 节次, Q 时间/课程信息
+}
+
+// TestCalcLayout 验证版式计算的联立约束：
+// 行高 × (100 表格行 + 2 标题行) ≈ 可用高度；周次列 ≥ 4.5×字号；
+// 单元格 ≥ 1.5×字号；各列百分比合计 ≈ 100%；列数 = 周数 + 4。
+func TestCalcLayout(t *testing.T) {
+	s := NewSampleSchedule()
+	if s.NumWeeks != 13 {
+		t.Fatalf("示例周数 = %d", s.NumWeeks)
 	}
-	if len(mainColPcts) != 17 {
-		t.Errorf("mainColPcts 长度 = %d, want 17", len(mainColPcts))
+	ly := s.calcLayout(false)
+	if got := len(ly.colPct); got != s.NumWeeks+4 {
+		t.Fatalf("colPct 长度 = %d, want %d", got, s.NumWeeks+4)
 	}
+	// 高度约束：(100+2)×cellH = 可用高（210-12）
+	wantH := 210.0 - 12.0
+	if got := ly.cellHMM * float64(tableCellRows+titleCellRows); got > wantH+1e-6 {
+		t.Errorf("总行高 %.4f 超过可用高度 %.4f", got, wantH)
+	}
+	// 字体须同时满足高度(≤cellH/1.5)与宽度(周列 4.5 全角)约束
+	if ly.fontMM > ly.cellHMM/charHeightsInCell+1e-9 {
+		t.Errorf("font %.4f 超出 高度/1.5 = %.4f", ly.fontMM, ly.cellHMM/charHeightsInCell)
+	}
+	if ly.cellWMM < ly.fontMM*fullCharsInWeekCol-1e-9 {
+		t.Errorf("周列宽 %.4f 不足以容纳 4.5 字符(需 %.4f)", ly.cellWMM, ly.fontMM*fullCharsInWeekCol)
+	}
+	// 列宽百分比合计 ≈ 100%
 	sum := 0.0
-	for _, p := range mainColPcts {
+	for _, p := range ly.colPct {
 		sum += p
 	}
 	if sum < 99.5 || sum > 100.5 {
-		t.Errorf("mainColPcts 合计 = %.2f%%，应约为 100%%", sum)
+		t.Errorf("colPct 合计 = %.2f%%，应约为 100%%", sum)
+	}
+	// 标题占 2 格高
+	if got := ly.titleHMM; got != 2*ly.cellHMM {
+		t.Errorf("titleHMM = %.4f, want 2×cellH = %.4f", got, 2*ly.cellHMM)
+	}
+	// 竖版翻转纸张
+	lyp := s.calcLayout(true)
+	if lyp.pageWMM != 210 || lyp.pageHMM != 297 {
+		t.Errorf("竖版纸张 = %.0f×%.0f, want 210×297", lyp.pageWMM, lyp.pageHMM)
 	}
 }
 
-// TestRenderHTMLPortrait 验证竖版渲染：比例翻转、A4 纵向打印。
+// TestRenderHTMLPortrait 验证竖版渲染：A4 纵向纸张。
 func TestRenderHTMLPortrait(t *testing.T) {
 	s := NewSampleSchedule()
 	var b strings.Builder
@@ -244,16 +276,14 @@ func TestRenderHTMLPortrait(t *testing.T) {
 	}
 	html := b.String()
 	for _, want := range []string{
-		`<div class="sheet portrait">`,
-		"div.sheet.portrait", // 翻转比例 → 竖版更窄
-		"@page { size: A4 portrait; margin: 8mm; }",
-		"版面：A4 纵向", // 页脚提示
+		`<div class="page">`,
+		".page { width: 210.0mm; height: 297.0mm", // 翻转后的 A4 纵向纸张
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("竖版渲染缺少 %q", want)
 		}
 	}
-	if strings.Contains(html, `size: A4 landscape`) {
-		t.Error("竖版渲染不应包含 A4 landscape @page")
+	if strings.Contains(html, ".page { width: 297.0mm; height: 210.0mm") {
+		t.Error("竖版渲染不应使用横向纸张尺寸")
 	}
 }
