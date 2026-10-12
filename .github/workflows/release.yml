@@ -1,0 +1,264 @@
+name: Release
+
+# 发布规则：
+#   push 到 main      → 自动递增 patch（从已有 tag 计算），打 tag、建 Release、
+#                       编译 Windows/Linux x86 二进制、推送 ghcr.io 镜像
+#   push vX.Y.Z tag   → 以该 tag 为准建 Release（不递增）、编译并推送镜像
+#   commit 带 [minor]/[major] → 改为递增 minor/major
+#   commit 带 [skip release]  → 本次不发布（测试仍会跑）
+#   workflow_dispatch → 手动选择递增方式（优先于 commit message）
+#
+# 注意：不发布预编译产物之外的任何隐私信息；镜像推送到当前仓库对应的 ghcr 库。
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 版本递增方式
+        type: choice
+        default: patch
+        options: [patch, minor, major]
+
+permissions:
+  contents: write # 创建 tag / Release
+  packages: write # 推送 ghcr.io 镜像
+
+# 两个 run 同时算版本会算出同一个号，因此排队而非并发
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+  version:
+    name: Next version
+    runs-on: ubuntu-latest
+    needs: test
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.ref_type == 'tag' ||
+      !contains(github.event.head_commit.message, '[skip release]')
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+      tag: ${{ steps.next.outputs.tag }}
+      image: ${{ steps.next.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 版本由 tag 计算，浅克隆没有 tag
+          fetch-depth: 0
+
+      - name: Compute the next version
+        id: next
+        env:
+          DISPATCH_BUMP: ${{ inputs.bump }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            # 直接使用推送的 tag（不递增）
+            tag="${GITHUB_REF_NAME}"
+            version="${tag#v}"
+            echo "使用推送的 tag: $tag"
+          else
+            bump="${DISPATCH_BUMP}"
+            if [ -z "$bump" ]; then
+              case "$(printf '%s' "${COMMIT_MESSAGE}" | grep -oE '\[(major|minor|patch)\]' | head -n 1)" in
+                '[major]') bump=major ;;
+                '[minor]') bump=minor ;;
+                '[patch]') bump=patch ;;
+                *)         bump=patch ;;
+              esac
+            fi
+            version="$(.github/scripts/next-version.sh "$bump")"
+            tag="v${version}"
+            echo "递增方式 ${bump}: ${tag}"
+          fi
+
+          # ghcr.io 镜像名必须小写
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "image=$image"
+          } >> "$GITHUB_OUTPUT"
+
+  binaries:
+    name: Build binaries (${{ matrix.goos }})
+    runs-on: ubuntu-latest
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            ext: ""
+            archive: tar.gz
+          - goos: windows
+            ext: ".exe"
+            archive: zip
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GOOS: ${{ matrix.goos }}
+      GOARCH: amd64
+      EXT: ${{ matrix.ext }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build ${{ matrix.goos }}/amd64
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for cmd in server fetch render; do
+            CGO_ENABLED=0 go build -trimpath \
+              -ldflags "-s -w -X main.version=${VERSION}" \
+              -o "dist/buaa-schedule-${cmd}${EXT}" "./cmd/${cmd}"
+          done
+          ls -l dist
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          name="buaa-schedule-${VERSION}-${{ matrix.goos }}-amd64"
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            (cd dist && zip -9 "../${name}.zip" ./*)
+          else
+            tar -C dist -czf "${name}.tar.gz" .
+          fi
+          mkdir -p upload
+          mv "${name}.${{ matrix.archive }}" upload/
+          ls -l upload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.goos }}
+          path: upload/*
+          if-no-files-found: error
+
+  docker:
+    name: Publish image
+    runs-on: ubuntu-latest
+    needs: version
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ needs.version.outputs.image }}
+          tags: |
+            type=raw,value=${{ needs.version.outputs.version }}
+            type=raw,value=latest
+            type=sha,format=short
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          # 只构建 amd64；需要树莓派/arm NAS 时在下面追加 linux/arm64
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ needs.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    name: Create release
+    runs-on: ubuntu-latest
+    needs: [version, binaries]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Tag, notes and release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+          IMAGE: ${{ needs.version.outputs.image }}
+        run: |
+          set -euo pipefail
+
+          # 已存在则不动（重跑 workflow 不应失败）
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "tag ${TAG} 已存在，保持不变"
+          else
+            git tag "${TAG}"
+            git push origin "${TAG}"
+          fi
+
+          previous="$(git tag --list 'v[0-9]*' --sort=-v:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | grep -v "^${TAG}$" \
+            | head -n 1 || true)"
+
+          {
+            echo '## 容器镜像'
+            echo
+            echo "\`${IMAGE}:${VERSION}\`"
+            echo
+            echo '```bash'
+            echo "docker pull ${IMAGE}:${VERSION}"
+            echo '```'
+            echo
+            echo '## 二进制'
+            echo
+            echo '下载下方 Windows / Linux (amd64) 压缩包，解压后得到 server / fetch / render 三个可执行文件。'
+            echo
+            if [ -n "$previous" ]; then
+              echo "## 自 ${previous} 以来的改动"
+              echo
+              git log --no-merges --pretty='- %s (%h)' "${previous}..${TAG}"
+            else
+              echo '## 首个发布'
+            fi
+          } > /tmp/notes.md
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release ${TAG} 已存在，仅更新附件"
+            gh release upload "${TAG}" dist/* --clobber
+          else
+            gh release create "${TAG}" --title "${TAG}" --notes-file /tmp/notes.md dist/*
+          fi

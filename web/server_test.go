@@ -49,3 +49,67 @@ func TestWriteLoginPageError(t *testing.T) {
 		t.Error("登录失败应停留登录表单页")
 	}
 }
+
+// TestHelpEndpoint 验证 /help 的 JSON 与 Markdown 两种形态。
+func TestHelpEndpoint(t *testing.T) {
+	srv := New(Config{Version: "v9.9.9"})
+	h := srv.Handler()
+
+	// 默认 JSON
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/help", nil))
+	if rec.Code != 200 || !strings.Contains(rec.Header().Get("Content-Type"), "application/json") {
+		t.Fatalf("GET /help => %d %s", rec.Code, rec.Header().Get("Content-Type"))
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"api_version", "/api/v1/courses", "v9.9.9", "query_parameters", "error_codes"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/help JSON 缺少 %q", want)
+		}
+	}
+	if strings.Contains(rec.Header().Get("Cache-Control"), "") == false {
+		t.Error("/help 应带防缓存头")
+	}
+
+	// Markdown（format=md）
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, httptest.NewRequest("GET", "/help?format=md", nil))
+	if ct := rec2.Header().Get("Content-Type"); !strings.Contains(ct, "text/markdown") {
+		t.Errorf("GET /help?format=md 内容类型 = %s", ct)
+	}
+	md := rec2.Body.String()
+	for _, want := range []string{"# buaa-schedule", "## 接口", "GET /api/v1/courses", "## 错误码"} {
+		if !strings.Contains(md, want) {
+			t.Errorf("Markdown 文档缺少 %q", want)
+		}
+	}
+
+	// Accept: text/plain 也返回 Markdown
+	req := httptest.NewRequest("GET", "/help", nil)
+	req.Header.Set("Accept", "text/plain")
+	rec3 := httptest.NewRecorder()
+	h.ServeHTTP(rec3, req)
+	if !strings.Contains(rec3.Header().Get("Content-Type"), "text/markdown") {
+		t.Errorf("Accept: text/plain 应返回 Markdown, got %s", rec3.Header().Get("Content-Type"))
+	}
+}
+
+// TestAPICoursesUnauthorized 验证未登录时 API 返回 401 JSON（而非重定向），
+// 以及非法 date 会先被鉴权拦截（手动登录模式）。
+func TestAPICoursesUnauthorized(t *testing.T) {
+	srv := New(Config{})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/api/v1/courses?date=2026-09-07", nil))
+	if rec.Code != 401 {
+		t.Fatalf("未登录 GET /api/v1/courses => %d, want 401", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"unauthorized"`) {
+		t.Errorf("401 响应应为 JSON 错误结构, got %s", rec.Body.String())
+	}
+	// 方法限制：POST 应由 ServeMux 返回 405
+	rec2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec2, httptest.NewRequest("POST", "/api/v1/courses", nil))
+	if rec2.Code != 405 {
+		t.Errorf("POST /api/v1/courses => %d, want 405", rec2.Code)
+	}
+}

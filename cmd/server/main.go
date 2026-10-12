@@ -22,6 +22,9 @@ import (
 	"github.com/lyy1119/BuaaScheduleRender/web"
 )
 
+// version 由构建期注入（-ldflags "-X main.version=v1.0.0"），出现在 /help 中。
+var version = "dev"
+
 func main() {
 	addr := flag.String("addr", ":8080", "监听地址")
 	user := flag.String("user", os.Getenv("XSKB_USER"), "北航统一身份认证账号（自动登录模式；也可用环境变量 XSKB_USER）")
@@ -40,6 +43,7 @@ func main() {
 		}
 	}
 	cfg := web.Config{
+		Version:     version,
 		Username:    *user,
 		Password:    *pass,
 		FirstMonday: firstMonday,
@@ -62,7 +66,7 @@ func main() {
 		log.Printf("手动登录模式（访问 / 开始）")
 	}
 	srv := web.New(cfg)
-	log.Printf("课表服务监听 %s（-first 未提供时将按课表数据自动推算第 1 周周一；调试模式=%v）", *addr, *debug)
+	log.Printf("课表服务监听 %s（版本 %s；-first 未提供时将按课表数据自动推算第 1 周周一；调试模式=%v）", *addr, version, *debug)
 	if err := http.ListenAndServe(*addr, srv.Handler()); err != nil {
 		log.Fatalf("服务启动失败: %v", err)
 	}

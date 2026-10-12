@@ -1,0 +1,42 @@
+# 课表服务 docker-compose 模板
+#
+# 用法：先复制再修改（复制出来的 docker-compose.yml 已在 .gitignore 中，
+# 本地设置不会进入仓库，也不会在 pull 时冲突）：
+#
+#   cp docker-compose.yml.template docker-compose.yml
+#   # 修改下面的 <user> / <pass> 与端口映射，然后：
+#   docker compose up -d
+#
+# 默认使用 CI 发布到 GitHub 容器库（ghcr.io）的镜像；
+# 若无法访问容器库或想本地构建，改用文件末尾注释掉的 build 方式。
+
+services:
+  schedule:
+    # 默认方式：直接拉取 GitHub 发布的镜像
+    image: ghcr.io/lyy1119/buaaschedulerender:latest
+    # missing：本地没有才拉取；always：每次启动都检查更新
+    pull_policy: missing
+
+    # --- 方式二（备用）：本地构建镜像 ---
+    # 需要访问容器库失败时，注释掉上面的 image/pull_policy，改用下面这段：
+    #
+    # build:
+    #   context: .
+    #   args:
+    #     VERSION: ${BUILD_VERSION:-compose}
+    # # 与 build 搭配时可用下面这行给本地镜像命名（可选）：
+    # image: buaa-schedule-server:local
+
+    container_name: buaa-schedule-server
+    restart: unless-stopped
+    ports:
+      # 宿主机端口映射：<ip:port>:8080
+      - "<ip:port>:8080"
+    environment:
+      # 账号与密码（请改成自己的值；提供后自动登录并跳过登录页）
+      XSKB_USER: <user>
+      XSKB_PASS: <pass>
+      # 时区（与镜像内一致）
+      TZ: Asia/Shanghai
+    # 需要附加启动参数时取消注释（默认参数为 -addr :8080）：
+    # command: ["-addr", ":8080", "-debug"]

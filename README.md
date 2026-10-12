@@ -26,6 +26,8 @@
   自动计算；课程名按列宽预算截断，连堂以 `#` 标记并有图例说明。
 - **Web 服务**：登录 / 课表（含工具栏） / 纯课表打印页，同一端口、页面间跳转；
   课表页与纯课表页带强防缓存响应头；多用户会话隔离、支持并发。
+- **HTTP API**：`/help` 提供机读契约（JSON）与人类可读的 Markdown 两种形态；
+  `GET /api/v1/courses?date=YYYY-MM-DD` 按日期查询当天课程列表。
 - **多入口**：`server`（Web）、`render`（命令行渲染 HTML 文件）、`fetch`（抓取 JSON）。
 
 ## 项目结构
@@ -69,6 +71,8 @@ go run ./cmd/server -addr :8080 -user 你的账号 -pass 你的密码
 | `/schedule?sem=20261` | 课表页：工具栏（学期查询 / 强制刷新 / 打印 / 退出登录）+ 课表 |
 | `/schedule/print?sem=20261` | 纯课表页（A4 HTML，可直接打印） |
 | `/logout` | 退出登录 |
+| `/help` | API 契约：默认 JSON；`?format=md` 或 `Accept: text/markdown` 返回 Markdown |
+| `/api/v1/courses?date=2026-09-07` | 查询指定日期的课程列表（JSON） |
 
 说明：
 - 学期缺省按当前时间自动推断并预填；也可手动改 `sem` 查询；
@@ -89,6 +93,60 @@ go run ./cmd/server -addr :8080 -user 你的账号 -pass 你的密码
 
 > 提示：密码含 `! ^ % #` 等特殊字符时，**优先用环境变量** `XSKB_PASS` 传递，
 > 避免交互 shell 的历史展开/转义问题。
+
+## HTTP API
+
+完整契约见 `/help`（机读 JSON）或 `/help?format=md`（Markdown）。摘要：
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /help` | 服务契约：约定、页面、接口、参数、字段、错误码与示例 |
+| `GET /api/v1/courses` | 查询指定日期当天的课程列表 |
+
+`GET /api/v1/courses` 参数：
+
+- `date=YYYY-MM-DD`：查询日期（默认今天）
+- `sem=20261`：学期号（省略时按 `date` 所在学期推断）
+- `refresh=1`：绕过会话缓存，强制重新抓取
+
+响应示例（节选）：
+
+```json
+{
+  "service": "buaa-schedule",
+  "api_version": "1",
+  "semester": "20261",
+  "date": "2026-09-11",
+  "week": 1,
+  "in_term": true,
+  "weekday": 5,
+  "weekday_name": "周五",
+  "term_start": "2026-09-07",
+  "num_weeks": 19,
+  "course_count": 1,
+  "courses": [
+    {
+      "course_id": "P-101",
+      "name": "大学物理(上)",
+      "teachers": ["陈平"],
+      "locations": ["教5-101"],
+      "weekday": 5,
+      "start_slot": 3,
+      "end_slot": 4,
+      "start_time": "09:50",
+      "end_time": "11:25"
+    }
+  ]
+}
+```
+
+错误响应统一为 `{"error":{"code":"...","message":"..."}}`；未登录返回 `401`
+（手动登录模式需先建立会话），非法日期返回 `400`，教务数据获取失败返回 `502`。
+
+```bash
+curl -s 'http://127.0.0.1:8080/api/v1/courses?date=2026-09-11' | jq .
+curl -s 'http://127.0.0.1:8080/help?format=md'
+```
 
 ## 命令行工具
 
@@ -125,14 +183,35 @@ $env:XSKB_USER="你的账号"; $env:XSKB_PASS="你的密码"
 
 ## Docker 部署
 
+镜像为两阶段构建：`golang` 镜像编译（`CGO_ENABLED=0`，完全静态），
+`scratch` 镜像运行（无 shell/包管理器/libc），并已内置上海时区与根证书。
+
 ```bash
-# 修改 docker-compose.yml 中的环境变量与端口映射后：
-docker compose up -d --build
+# 使用模板（复制出来的 docker-compose.yml 已被 gitignore）
+cp docker-compose.yml.template docker-compose.yml
+# 修改其中的 <user> / <pass> 与 <ip:port> 后：
+docker compose up -d
+
+# 或直接构建运行
+docker build -t buaa-schedule-server .
+docker run -d --name buaa-schedule -p 8080:8080 \
+  -e XSKB_USER=<账号> -e XSKB_PASS=<密码> buaa-schedule-server
 ```
 
-- `Dockerfile`：`golang` 编译、`alpine` 运行，已设置上海时区（`Asia/Shanghai`）；
-  `ENTRYPOINT` 固定二进制、默认参数 `-addr :8080`，可附加其它参数。
-- `docker-compose.yml`：`XSKB_USER` / `XSKB_PASS` 环境变量与端口映射留占位，自行替换。
+`docker-compose.yml.template` 默认使用 CI 发布到 GitHub 容器库的镜像
+（`ghcr.io/…:latest`），文件内同时给出注释掉的本地 `build` 方式备用。
+
+## 自动发布（GitHub Actions）
+
+`.github/workflows/release.yml` 在 push 到 `main` 时自动：
+
+1. 依据已有 tag 递增 patch 版本号（`.github/scripts/next-version.sh`）；
+2. 打 tag 并创建 GitHub Release；
+3. 编译 Windows / Linux (amd64) 的 `server` / `fetch` / `render` 并作为附件上传；
+4. 构建并推送容器镜像到 `ghcr.io`。
+
+手动推送 `vX.Y.Z` tag 时以该 tag 为准发布（不再递增）。提交信息可控制递增方式：
+`[minor]`、`[major]`，或 `[skip release]` 跳过发布；也可用 `workflow_dispatch` 手动触发。
 
 ## 测试
 

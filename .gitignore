@@ -32,3 +32,6 @@ go.work.sum
 # .vscode/
 
 *.bak
+
+# 用户本地 compose 配置（从 docker-compose.yml.template 复制而来）
+docker-compose.yml

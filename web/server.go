@@ -49,6 +49,8 @@ type Config struct {
 	// AutoClient 可选：自动登录模式预验证并注入的抓取客户端
 	//（由启动方完成登录验证后传入，避免 Web 内重复登录）。
 	AutoClient *fetch.Client
+	// Version 构建期注入的版本号（出现在 /help 中）。
+	Version string
 	// Logger 输出日志；nil 时静默（Debug=true 时若未提供将使用 os.Stdout）。
 	Logger *log.Logger
 }
@@ -97,6 +99,9 @@ func New(cfg Config) *Server {
 	if cfg.SessionIdle <= 0 {
 		cfg.SessionIdle = 30 * time.Minute
 	}
+	if cfg.Version == "" {
+		cfg.Version = "dev"
+	}
 	if cfg.Logger == nil && cfg.Debug {
 		cfg.Logger = log.New(log.Writer(), "[web] ", log.LstdFlags)
 	}
@@ -117,6 +122,11 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("/logout", s.handleLogout)
 	mux.HandleFunc("/schedule", s.handleSchedule)
 	mux.HandleFunc("/schedule/print", s.handleSchedulePrint)
+	// 机读 API 与帮助文档；方法不匹配时由下面的兜底模式返回 405
+	mux.HandleFunc("GET /help", s.handleHelp)
+	mux.HandleFunc("/help", s.methodNotAllowed("GET"))
+	mux.HandleFunc("GET /api/v1/courses", s.handleAPICourses)
+	mux.HandleFunc("/api/v1/courses", s.methodNotAllowed("GET"))
 	s.mux = mux
 	return s
 }
@@ -339,27 +349,7 @@ func (s *Server) handleSchedulePrint(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 150*time.Second)
 	defer cancel()
 
-	var data []byte
-	var err error
-	now := time.Now()
-	uc.mu.Lock()
-	switch {
-	case !force && uc.cacheSem == sem && now.Sub(uc.cacheAt) < fetchCacheTTL:
-		data = uc.cacheJSON
-		s.debugf("fetch 命中缓存：sem=%s（缓存 %s 前）", sem, now.Sub(uc.cacheAt).Round(time.Second))
-	case uc.cacheSem == sem && !force:
-		s.debugf("fetch 缓存过期：sem=%s（%s 前，将重新抓取）", sem, now.Sub(uc.cacheAt).Round(time.Second))
-		data, err = uc.cli.FetchJSON(ctx, sem)
-	default:
-		s.debugf("fetch 开始：sem=%s%s", sem, map[bool]string{true: "（强制刷新）", false: ""}[force])
-		data, err = uc.cli.FetchJSON(ctx, sem)
-	}
-	if err == nil {
-		uc.cacheSem, uc.cacheJSON, uc.cacheAt = sem, data, now
-	} else {
-		s.debugf("fetch 失败：sem=%s（%s）", sem, err)
-	}
-	uc.mu.Unlock()
+	data, err := s.scheduleJSON(ctx, uc, sem, force)
 	if err != nil {
 		s.logf("fetch error (sem=%s): %v", sem, err)
 		noCache(w)
@@ -379,6 +369,15 @@ func (s *Server) handleSchedulePrint(w http.ResponseWriter, r *http.Request) {
 	opts := render.RenderOptions{Portrait: s.cfg.Portrait}
 	if err := render.RenderHTML(w, sched, opts); err != nil {
 		s.logf("render error: %v", err)
+	}
+}
+
+// methodNotAllowed 返回 405（JSON 错误结构），用于 API/帮助路径的方法兜底。
+func (s *Server) methodNotAllowed(allow string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Allow", allow)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed",
+			"该接口只接受 "+allow+" 方法（收到 "+r.Method+"）")
 	}
 }
 

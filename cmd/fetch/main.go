@@ -20,6 +20,9 @@ import (
 	"github.com/lyy1119/BuaaScheduleRender/fetch"
 )
 
+// version 由构建期注入（-ldflags "-X main.version=v1.0.0"）。
+var version = "dev"
+
 func main() {
 	user := flag.String("user", os.Getenv("XSKB_USER"), "北航统一身份认证账号（或用环境变量 XSKB_USER）")
 	pass := flag.String("pass", os.Getenv("XSKB_PASS"), "账号密码（含特殊字符时推荐优先用环境变量 XSKB_PASS 传递，避免 shell 转义问题）")

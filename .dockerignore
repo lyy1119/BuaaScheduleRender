@@ -1,0 +1,7 @@
+# 构建上下文裁剪：这些内容不需要进入镜像
+.git
+.github
+dist
+course_schedule.univer
+docker-compose.yml
+README.md

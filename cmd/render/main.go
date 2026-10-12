@@ -27,6 +27,9 @@ import (
 	render "github.com/lyy1119/BuaaScheduleRender/render"
 )
 
+// version 由构建期注入（-ldflags "-X main.version=v1.0.0"）。
+var version = "dev"
+
 func main() {
 	out := flag.String("out", "schedule.html", "输出的 HTML 文件路径")
 	landscape := flag.Bool("landscape", false, "横向打印（A4 横向；默认竖向）")
