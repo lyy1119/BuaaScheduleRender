@@ -1,14 +1,14 @@
 name: Release
 
-# 发布规则：
-#   push 到 main      → 自动递增 patch（从已有 tag 计算），打 tag、建 Release、
-#                       编译 Windows/Linux x86 二进制、推送 ghcr.io 镜像
-#   push vX.Y.Z tag   → 以该 tag 为准建 Release（不递增）、编译并推送镜像
-#   commit 带 [minor]/[major] → 改为递增 minor/major
-#   commit 带 [skip release]  → 本次不发布（测试仍会跑）
-#   workflow_dispatch → 手动选择递增方式（优先于 commit message）
+# 发布规则（以 tag 为准）：
+#   push 带 tag 的 commit（tag 形如 v1.2.3）→ 跑测试 + 编译 Windows/Linux x86
+#     二进制 + 推送 ghcr 镜像 + 创建/更新该 tag 的 GitHub Release
+#   push 到 main（无 tag）                  → 只跑测试，不发布
+#   workflow_dispatch                       → 手动发布：可指定版本号；
+#     留空则按已有 tag 自动递增 patch 并创建新 tag
 #
-# 注意：不发布预编译产物之外的任何隐私信息；镜像推送到当前仓库对应的 ghcr 库。
+# tag 由维护者自行创建并推送，例如：
+#   git tag v1.2.3 && git push origin v1.2.3
 
 on:
   push:
@@ -16,17 +16,16 @@ on:
     tags: ['v*']
   workflow_dispatch:
     inputs:
-      bump:
-        description: 版本递增方式
-        type: choice
-        default: patch
-        options: [patch, minor, major]
+      version:
+        description: 要发布的版本号（不带 v；留空则自动递增 patch）
+        type: string
+        default: ""
 
 permissions:
   contents: write # 创建 tag / Release
   packages: write # 推送 ghcr.io 镜像
 
-# 两个 run 同时算版本会算出同一个号，因此排队而非并发
+# 同一时间只跑一个发布流程
 concurrency:
   group: release
   cancel-in-progress: false
@@ -52,54 +51,64 @@ jobs:
         run: go test ./...
 
   version:
-    name: Next version
+    name: Decide version
     runs-on: ubuntu-latest
     needs: test
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.ref_type == 'tag' ||
-      !contains(github.event.head_commit.message, '[skip release]')
     outputs:
-      version: ${{ steps.next.outputs.version }}
-      tag: ${{ steps.next.outputs.tag }}
-      image: ${{ steps.next.outputs.image }}
+      should_release: ${{ steps.decide.outputs.should_release }}
+      version: ${{ steps.decide.outputs.version }}
+      tag: ${{ steps.decide.outputs.tag }}
+      image: ${{ steps.decide.outputs.image }}
     steps:
       - uses: actions/checkout@v4
         with:
-          # 版本由 tag 计算，浅克隆没有 tag
-          fetch-depth: 0
+          fetch-depth: 0 # 需要 tag 历史
 
-      - name: Compute the next version
-        id: next
+      - name: Decide whether to release and which version
+        id: decide
         env:
-          DISPATCH_BUMP: ${{ inputs.bump }}
-          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          version=""
+          tag=""
+          should_release="false"
 
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            # 直接使用推送的 tag（不递增）
-            tag="${GITHUB_REF_NAME}"
+          if [ "$REF_TYPE" = "tag" ]; then
+            # 推送了 tag：以该 tag 为准发布
+            tag="$REF_NAME"
             version="${tag#v}"
-            echo "使用推送的 tag: $tag"
-          else
-            bump="${DISPATCH_BUMP}"
-            if [ -z "$bump" ]; then
-              case "$(printf '%s' "${COMMIT_MESSAGE}" | grep -oE '\[(major|minor|patch)\]' | head -n 1)" in
-                '[major]') bump=major ;;
-                '[minor]') bump=minor ;;
-                '[patch]') bump=patch ;;
-                *)         bump=patch ;;
-              esac
+            should_release="true"
+            echo "tag 推送：发布 $tag"
+          elif [ "$EVENT" = "workflow_dispatch" ]; then
+            # 手动触发：指定版本，或自动递增 patch
+            if [ -n "$INPUT_VERSION" ]; then
+              version="${INPUT_VERSION#v}"
+            else
+              version="$(.github/scripts/next-version.sh patch)"
             fi
-            version="$(.github/scripts/next-version.sh "$bump")"
             tag="v${version}"
-            echo "递增方式 ${bump}: ${tag}"
+            should_release="true"
+            echo "手动触发：发布 $tag"
+          else
+            # main 分支推送：只有当前 commit 已经带 tag 时才发布
+            head_tag="$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
+            if [ -n "$head_tag" ]; then
+              tag="$head_tag"
+              version="${tag#v}"
+              should_release="true"
+              echo "当前 commit 已带 tag：发布 $tag"
+            else
+              echo "当前 commit 没有 tag：只跑测试，不发布"
+            fi
           fi
 
-          # ghcr.io 镜像名必须小写
-          image="ghcr.io/${GITHUB_REPOSITORY,,}"
           {
+            echo "should_release=$should_release"
             echo "version=$version"
             echo "tag=$tag"
             echo "image=$image"
@@ -109,6 +118,7 @@ jobs:
     name: Build binaries (${{ matrix.goos }})
     runs-on: ubuntu-latest
     needs: version
+    if: needs.version.outputs.should_release == 'true'
     strategy:
       matrix:
         include:
@@ -165,6 +175,7 @@ jobs:
     name: Publish image
     runs-on: ubuntu-latest
     needs: version
+    if: needs.version.outputs.should_release == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -188,7 +199,6 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          # 只构建 amd64；需要树莓派/arm NAS 时在下面追加 linux/arm64
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -202,6 +212,7 @@ jobs:
     name: Create release
     runs-on: ubuntu-latest
     needs: [version, binaries]
+    if: needs.version.outputs.should_release == 'true'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -221,7 +232,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 已存在则不动（重跑 workflow 不应失败）
+          # tag 已存在（推 tag 触发）则保持不动；手动发布时创建并推送
           if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
             echo "tag ${TAG} 已存在，保持不变"
           else

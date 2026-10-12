@@ -206,15 +206,22 @@ docker run -d --name buaa-schedule -p 8080:8080 \
 
 ## 自动发布（GitHub Actions）
 
-`.github/workflows/release.yml` 在 push 到 `main` 时自动：
+发布**以 tag 为准**（`vX.Y.Z`），tag 由维护者自行创建：
 
-1. 依据已有 tag 递增 patch 版本号（`.github/scripts/next-version.sh`）；
-2. 打 tag 并创建 GitHub Release；
-3. 编译 Windows / Linux (amd64) 的 `server` / `fetch` / `render` 并作为附件上传；
-4. 构建并推送容器镜像到 `ghcr.io`。
+```bash
+git tag v1.2.3
+git push origin v1.2.3        # 或 git push --tags
+```
 
-手动推送 `vX.Y.Z` tag 时以该 tag 为准发布（不再递增）。提交信息可控制递增方式：
-`[minor]`、`[major]`，或 `[skip release]` 跳过发布；也可用 `workflow_dispatch` 手动触发。
+`.github/workflows/release.yml` 的规则：
+
+| 触发 | 行为 |
+| --- | --- |
+| push 带 tag 的 commit | 跑测试 → 编译 Windows / Linux (amd64) 的 `server`/`fetch`/`render` → 推送 ghcr 镜像 → 创建/更新该 tag 的 GitHub Release（附二进制） |
+| push 到 `main`（无 tag） | 只跑测试，不发布 |
+| `workflow_dispatch` | 手动发布：可填写版本号；留空则依据已有 tag 自动递增 patch 并创建新 tag |
+
+> 注意：`main` 推送不会自动创建 tag，也不会发布；要发布就先给该 commit 打 tag 再推送。
 
 ## 测试
 
