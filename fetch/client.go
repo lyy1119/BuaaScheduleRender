@@ -102,47 +102,74 @@ func (c *Client) FetchJSON(ctx context.Context, semester string) ([]byte, error)
 	return body, nil
 }
 
-// ensureLoggedIn 访问 gsmis 触发跳转拿到 SSO service 地址，然后自动登录。
-func (c *Client) ensureLoggedIn(ctx context.Context) error {
+// ssoLoginURL 访问 gsmis 首页，拿到跳转到统一身份认证的登录地址（带 service 参数）。
+func (c *Client) ssoLoginURL(ctx context.Context) (string, error) {
 	index := c.gsmisBase + DefaultIndexPath
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, index, nil)
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.Header.Set("User-Agent", login.DefaultUserAgent)
 	noFollow := *c.session.HTTP
 	noFollow.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := noFollow.Do(req)
 	if err != nil {
-		return fmt.Errorf("访问 %s 失败: %w", index, err)
+		return "", fmt.Errorf("访问 %s 失败: %w", index, err)
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
-
-	loginURL := ""
 	if (resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusMovedPermanently) &&
 		strings.Contains(resp.Header.Get("Location"), "/login") {
-		loginURL = resp.Header.Get("Location")
+		return resp.Header.Get("Location"), nil
 	}
-	if loginURL == "" {
-		return fmt.Errorf("访问 %s 未得到 SSO 跳转（HTTP %d）", index, resp.StatusCode)
-	}
-	if err := c.session.CASLogin(ctx, loginURL, c.user, c.pass); err != nil {
-		return err
-	}
-	// 登录成功后访问一次 gsmis 首页，确保服务端建立业务会话（GS_SESSIONID）
-	req2, err := http.NewRequestWithContext(ctx, http.MethodGet, index, nil)
+	return "", fmt.Errorf("访问 %s 未得到 SSO 跳转（HTTP %d）", index, resp.StatusCode)
+}
+
+// touchIndex 登录成功后访问一次 gsmis 首页，确保服务端建立业务会话（GS_SESSIONID）。
+func (c *Client) touchIndex(ctx context.Context) error {
+	index := c.gsmisBase + DefaultIndexPath
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, index, nil)
 	if err != nil {
 		return err
 	}
-	req2.Header.Set("User-Agent", login.DefaultUserAgent)
-	resp2, err := c.session.HTTP.Do(req2)
+	req.Header.Set("User-Agent", login.DefaultUserAgent)
+	resp, err := c.session.HTTP.Do(req)
 	if err != nil {
 		return fmt.Errorf("登录后访问 gsmis 首页失败: %w", err)
 	}
-	io.Copy(io.Discard, resp2.Body)
-	resp2.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
 	return nil
+}
+
+// BeginLogin 开始一次登录：触发 gsmis → SSO 跳转并拉取登录页。
+// 返回的 LoginAttempt 可能要求验证码（attempt.CaptchaRequired()），
+// 调用方可用 attempt.CaptchaImage 取图给用户，然后 FinishLogin。
+func (c *Client) BeginLogin(ctx context.Context) (*login.LoginAttempt, error) {
+	loginURL, err := c.ssoLoginURL(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c.session.NewLoginAttempt(ctx, loginURL)
+}
+
+// FinishLogin 用本客户端的账号密码（以及验证码）完成一次登录尝试。
+// 若返回的错误满足 errors.Is(err, login.ErrCaptchaRequired)，说明服务器要求
+// 验证码（或验证码错误），此时 attempt 已刷新出新的验证码，可再次调用。
+func (c *Client) FinishLogin(ctx context.Context, attempt *login.LoginAttempt, captcha string) error {
+	if err := attempt.Submit(ctx, c.user, c.pass, captcha); err != nil {
+		return err
+	}
+	return c.touchIndex(ctx)
+}
+
+// ensureLoggedIn 自动登录（无验证码场景）：拿跳转地址 → 提交账号密码 → 激活会话。
+func (c *Client) ensureLoggedIn(ctx context.Context) error {
+	attempt, err := c.BeginLogin(ctx)
+	if err != nil {
+		return err
+	}
+	return c.FinishLogin(ctx, attempt, "")
 }
 
 func (c *Client) postData(ctx context.Context, semester string) ([]byte, error) {

@@ -113,3 +113,23 @@ func TestAPICoursesUnauthorized(t *testing.T) {
 		t.Errorf("POST /api/v1/courses => %d, want 405", rec2.Code)
 	}
 }
+
+// TestWriteCaptchaLoginPage 验证验证码登录页：内嵌 data URI 图片、token 隐藏域、
+// 账号回显与"换一张"入口。
+func TestWriteCaptchaLoginPage(t *testing.T) {
+	png := []byte("\x89PNG\r\n\x1a\nfake")
+	rec := httptest.NewRecorder()
+	writeCaptchaLoginPage(rec, "tok123", "sy0000000", png, "image/png", "请输入图中字符")
+	body := rec.Body.String()
+	for _, want := range []string{
+		"data:image/png;base64,", "name=\"token\" value=\"tok123\"",
+		"name=\"captcha\"", "sy0000000", "/login?retry=tok123", "请输入图中字符",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("验证码页缺少 %q", want)
+		}
+	}
+	if !strings.Contains(rec.Header().Get("Content-Type"), "text/html") {
+		t.Error("验证码页应为 HTML")
+	}
+}

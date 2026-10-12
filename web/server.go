@@ -18,7 +18,9 @@ package web
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"html"
 	"log"
@@ -30,6 +32,7 @@ import (
 
 	"github.com/lyy1119/BuaaScheduleRender"
 	"github.com/lyy1119/BuaaScheduleRender/fetch"
+	"github.com/lyy1119/BuaaScheduleRender/login"
 	"github.com/lyy1119/BuaaScheduleRender/render"
 )
 
@@ -63,11 +66,31 @@ const fetchCacheTTL = 3 * time.Minute
 
 // Server 是课表 Web 服务。
 type Server struct {
-	cfg     Config
-	clients *clientTable
-	mux     *http.ServeMux
-	logf    func(string, ...any)
-	debugf  func(string, ...any)
+	cfg      Config
+	clients  *clientTable
+	pendings *pendingTable
+	mux      *http.ServeMux
+	logf     func(string, ...any)
+	debugf   func(string, ...any)
+}
+
+// pendingLoginTTL 是"等待输入验证码"的登录会话有效期。
+const pendingLoginTTL = 5 * time.Minute
+
+// pendingLogin 是一次等待验证码的登录：保存抓取客户端（含 Cookie 会话）、
+// 登录尝试（execution + 验证码）、账号密码，供用户填写验证码后继续。
+// 仅存于内存，最多保留 pendingLoginTTL，成功/失败后立即删除。
+type pendingLogin struct {
+	cli     *fetch.Client
+	attempt *login.LoginAttempt
+	user    string
+	pass    string
+	expires time.Time
+}
+
+type pendingTable struct {
+	mu sync.Mutex
+	m  map[string]*pendingLogin
 }
 
 type clientTable struct {
@@ -106,7 +129,7 @@ func New(cfg Config) *Server {
 		cfg.Logger = log.New(log.Writer(), "[web] ", log.LstdFlags)
 	}
 	s := &Server{
-		cfg: cfg, clients: newClientTable(cfg.SessionIdle),
+		cfg: cfg, clients: newClientTable(cfg.SessionIdle), pendings: &pendingTable{m: map[string]*pendingLogin{}},
 		logf:   func(string, ...any) {},
 		debugf: func(string, ...any) {},
 	}
@@ -246,6 +269,32 @@ func (s *Server) loggedIn(r *http.Request) bool {
 	return ok
 }
 
+func (s *Server) addPending(token string, p *pendingLogin) {
+	s.pendings.mu.Lock()
+	defer s.pendings.mu.Unlock()
+	s.pendings.m[token] = p
+}
+
+func (s *Server) getPending(token string) (*pendingLogin, bool) {
+	s.pendings.mu.Lock()
+	defer s.pendings.mu.Unlock()
+	p, ok := s.pendings.m[token]
+	if !ok {
+		return nil, false
+	}
+	if time.Now().After(p.expires) {
+		delete(s.pendings.m, token)
+		return nil, false
+	}
+	return p, true
+}
+
+func (s *Server) dropPending(token string) {
+	s.pendings.mu.Lock()
+	defer s.pendings.mu.Unlock()
+	delete(s.pendings.m, token)
+}
+
 // ---- 处理器 ----
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -268,41 +317,149 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	noCache(w)
 	switch r.Method {
 	case http.MethodGet:
+		// 换一张验证码：?retry=<token>
+		if token := r.URL.Query().Get("retry"); token != "" {
+			if p, ok := s.getPending(token); ok {
+				ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+				if err := p.attempt.Refresh(ctx); err == nil {
+					s.renderCaptchaPage(w, r, p, token, "已更换验证码")
+					cancel()
+					return
+				}
+				cancel()
+				s.dropPending(token)
+				writeLoginPage(w, "验证码已失效，请重新登录")
+				return
+			}
+			writeLoginPage(w, "验证码已过期，请重新登录")
+			return
+		}
 		writeLoginPage(w, "")
+
 	case http.MethodPost:
 		if err := r.ParseForm(); err != nil {
 			writeLoginPage(w, "表单解析失败")
 			return
 		}
+
+		// 第二轮：带着验证码继续登录
+		if token := strings.TrimSpace(r.FormValue("token")); token != "" {
+			p, ok := s.getPending(token)
+			if !ok {
+				writeLoginPage(w, "验证码已过期，请重新登录")
+				return
+			}
+			captcha := strings.TrimSpace(r.FormValue("captcha"))
+			if captcha == "" {
+				s.renderCaptchaPage(w, r, p, token, "请输入验证码")
+				return
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+			err := p.cli.FinishLogin(ctx, p.attempt, captcha)
+			cancel()
+			if err != nil {
+				if errors.Is(err, login.ErrCaptchaRequired) {
+					// 验证码错误或过期：attempt 已刷新出新验证码，继续展示
+					s.logf("验证码不正确：账号 %s（%v）", p.user, err)
+					s.renderCaptchaPage(w, r, p, token, "验证码不正确或已过期，请重试："+err.Error())
+					return
+				}
+				s.logf("登录失败：账号 %s（%v）", p.user, err)
+				s.dropPending(token)
+				writeLoginPage(w, "登录失败："+html.EscapeString(err.Error()))
+				return
+			}
+			s.finishLogin(w, r, p.cli, p.user)
+			s.dropPending(token)
+			return
+		}
+
+		// 第一轮：账号密码
 		user := strings.TrimSpace(r.FormValue("username"))
 		pass := r.FormValue("password")
 		if user == "" || pass == "" {
 			writeLoginPage(w, "请输入账号与密码")
 			return
 		}
-		// 登录真实校验：抓取默认学期课表验证凭据，失败则留在登录页提示
-		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 		defer cancel()
-		sem := fetch.AutoSemester(time.Now())
 		cli := fetch.NewClient(user, pass)
-		data, err := cli.FetchJSON(ctx, sem)
+		attempt, err := cli.BeginLogin(ctx)
 		if err != nil {
 			s.logf("登录失败：账号 %s（%v）", user, err)
 			writeLoginPage(w, "登录失败："+html.EscapeString(err.Error()))
 			return
 		}
-		id := newSID()
-		uc := &userClient{cli: cli, lastSeen: time.Now(), cacheSem: sem, cacheJSON: data, cacheAt: time.Now()}
-		s.addClient(id, uc)
-		s.logf("登录成功：账号 %s（session %s…）", user, id[:8])
-		http.SetCookie(w, &http.Cookie{
-			Name: sessionCookie, Value: id, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode,
-		})
-		http.Redirect(w, r, "/schedule?sem="+sem, http.StatusFound)
+		// 登录页已要求验证码：保存登录过程并展示验证码
+		if attempt.CaptchaRequired() {
+			token := s.savePending(cli, attempt, user, pass)
+			s.logf("登录需要验证码：账号 %s", user)
+			s.renderCaptchaPage(w, r, &pendingLogin{cli: cli, attempt: attempt, user: user}, token,
+				"该账号或当前网络触发了统一身份认证验证码，请输入图中字符")
+			return
+		}
+		if err := cli.FinishLogin(ctx, attempt, ""); err != nil {
+			if errors.Is(err, login.ErrCaptchaRequired) {
+				token := s.savePending(cli, attempt, user, pass)
+				s.logf("登录需要验证码：账号 %s", user)
+				s.renderCaptchaPage(w, r, &pendingLogin{cli: cli, attempt: attempt, user: user}, token,
+					"统一身份认证要求验证码，请输入图中字符")
+				return
+			}
+			s.logf("登录失败：账号 %s（%v）", user, err)
+			writeLoginPage(w, "登录失败："+html.EscapeString(err.Error()))
+			return
+		}
+		s.finishLogin(w, r, cli, user)
+
 	default:
 		w.Header().Set("Allow", "GET, POST")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// savePending 保存一次等待验证码的登录，返回其 token。
+func (s *Server) savePending(cli *fetch.Client, attempt *login.LoginAttempt, user, pass string) string {
+	token := newSID()
+	s.addPending(token, &pendingLogin{
+		cli: cli, attempt: attempt, user: user, pass: pass,
+		expires: time.Now().Add(pendingLoginTTL),
+	})
+	return token
+}
+
+// renderCaptchaPage 取验证码图片并渲染"输入验证码"页面。
+func (s *Server) renderCaptchaPage(w http.ResponseWriter, r *http.Request, p *pendingLogin, token, msg string) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	img, mime, err := p.attempt.CaptchaImage(ctx)
+	if err != nil {
+		s.logf("获取验证码失败：%v", err)
+		writeLoginPage(w, "获取验证码失败："+html.EscapeString(err.Error()))
+		return
+	}
+	writeCaptchaLoginPage(w, token, p.user, img, mime, msg)
+}
+
+// finishLogin 登录成功后：抓取默认学期课表（同时验证凭据）、建立会话并跳转课表页。
+func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, cli *fetch.Client, user string) {
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	sem := fetch.AutoSemester(time.Now())
+	data, err := cli.FetchJSON(ctx, sem)
+	if err != nil {
+		s.logf("登录失败：账号 %s（%v）", user, err)
+		writeLoginPage(w, "登录失败："+html.EscapeString(err.Error()))
+		return
+	}
+	id := newSID()
+	uc := &userClient{cli: cli, lastSeen: time.Now(), cacheSem: sem, cacheJSON: data, cacheAt: time.Now()}
+	s.addClient(id, uc)
+	s.logf("登录成功：账号 %s（session %s…）", user, id[:8])
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookie, Value: id, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode,
+	})
+	http.Redirect(w, r, "/schedule?sem="+sem, http.StatusFound)
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -426,6 +583,10 @@ const pageStyle = `<style>
   button:hover { background:#1a5ecb; }
   .err { color:#c0392b; font-size:12px; margin-top:10px; }
   .hint { color:#888; font-size:12px; margin-top:12px; text-align:center; }
+  .account { font-size:13px; color:#333; margin:0 0 10px; text-align:center; }
+  img.captcha { display:block; margin:8px auto 4px; border:1px solid #c9d2dc; border-radius:4px;
+                cursor:pointer; max-width:100%; }
+  .captcha-tip { text-align:center; font-size:12px; color:#888; margin:0 0 6px; }
 </style>`
 
 func pageBase(title string) string {
@@ -444,6 +605,31 @@ func writeLoginPage(w http.ResponseWriter, errMsg string) {
   </form>`)
 	if errMsg != "" {
 		fmt.Fprintf(w, `<div class="err">%s</div>`, errMsg)
+	}
+	fmt.Fprint(w, `</div></body></html>`)
+}
+
+// writeCaptchaLoginPage 渲染"输入验证码"页面：显示验证码图片（data URI，无需额外请求）
+// 与验证码输入框；hidden token 关联服务端保存的登录会话，支持"换一张"。
+func writeCaptchaLoginPage(w http.ResponseWriter, token, user string, img []byte, mime, errMsg string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	b64 := base64.StdEncoding.EncodeToString(img)
+	escToken := html.EscapeString(token)
+	escUser := html.EscapeString(user)
+	fmt.Fprint(w, pageBase("登录 - 验证码"))
+	fmt.Fprint(w, `<div class="card"><h1>北航课表 · 登录验证码</h1>
+  <p class="account">账号：<b>`+escUser+`</b></p>
+  <form method="post" action="/login">
+    <input type="hidden" name="token" value="`+escToken+`">
+    <label>验证码</label>
+    <input type="text" name="captcha" autocomplete="off" autofocus required>
+    <img class="captcha" src="data:`+html.EscapeString(mime)+`;base64,`+b64+`" alt="验证码"
+         onclick="location.href='/login?retry=`+escToken+`'">
+    <p class="captcha-tip">看不清？点击图片或 <a href="/login?retry=`+escToken+`">换一张</a></p>
+    <button type="submit">继续登录</button>
+  </form>`)
+	if errMsg != "" {
+		fmt.Fprintf(w, `<div class="err">%s</div>`, html.EscapeString(errMsg))
 	}
 	fmt.Fprint(w, `</div></body></html>`)
 }
